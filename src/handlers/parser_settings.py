@@ -6,8 +6,8 @@ from aiogram.fsm.context import FSMContext
 from keyboards.parser_settings import (
     get_parser_settings_kb,
     get_channel_selection_kb,
-    get_back_to_parser_settings_kb,
     get_interval_selection_kb,
+    get_back_to_parser_settings_kb,
 )
 from database.database import Database
 from .states import Form
@@ -342,7 +342,7 @@ async def process_price_max(message: Message, state: FSMContext):
         settings = db.get_settings(parser_name)
         db.save_settings(settings.get('keywords', []), min_price, max_price, parser_name)
 
-        await message.answer(f"✅ Ценовой диапазон обновлён: {min_price} - {max_price}")
+        await message.answer(f"✅ Ценовой диапазон обновлён: {min_price} - {max_price}", reply_markup=get_back_to_parser_settings_kb(parser_name))
         await state.clear()
     except ValueError:
         data = await state.get_data()
@@ -373,7 +373,7 @@ async def process_global_keywords(message: Message, state: FSMContext):
     settings = db.get_settings(parser_name)
     db.save_settings(keywords, settings.get('min_price'), settings.get('max_price'), parser_name)
 
-    await message.answer(f"✅ Глобальные ключевые слова обновлены.")
+    await message.answer(f"✅ Глобальные ключевые слова обновлены.", reply_markup=get_back_to_parser_settings_kb(parser_name))
     await state.clear()
 
 @router.callback_query(F.data == "set_vk_group_ids")
@@ -392,7 +392,7 @@ async def process_vk_group_ids(message: Message, state: FSMContext):
     settings = db.get_vk_settings()
     settings["group_ids"] = group_ids
     db.save_vk_full_settings(settings)
-    await message.answer("✅ ID групп VK обновлены.")
+    await message.answer("✅ ID групп VK обновлены.", reply_markup=get_back_to_parser_settings_kb("vk"))
     await state.clear()
 
 @router.callback_query(F.data == "set_habr_cities")
@@ -411,5 +411,5 @@ async def process_habr_cities(message: Message, state: FSMContext):
     settings = db.get_habr_settings()
     settings["cities"] = cities
     db.save_habr_settings(settings["keywords"], settings["min_salary"], settings["max_salary"], cities, settings["employment_types"])
-    await message.answer("✅ Города для Habr Career обновлены.")
+    await message.answer("✅ Города для Habr Career обновлены.", reply_markup=get_back_to_parser_settings_kb("habr"))
     await state.clear()

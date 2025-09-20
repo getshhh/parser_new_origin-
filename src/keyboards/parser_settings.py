@@ -10,11 +10,10 @@ def get_parser_settings_kb(parser_name: str):
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main_settings")]
     ])
 
-def get_channel_selection_kb(parser_name: str, channels: list):
+def get_channel_selection_kb(parser_name: str, channels: list, action: str):
     keyboard = []
-    for chat_id, title in channels:
-        keyboard.append([InlineKeyboardButton(text=f"📢 {title}", callback_data=f"select_{parser_name}_channel_{chat_id}")])
-    keyboard.append([InlineKeyboardButton(text="❌ Без канала", callback_data=f"remove_{parser_name}_channel")])
+    for channel in channels:
+        keyboard.append([InlineKeyboardButton(text=f"📢 {channel['name']}", callback_data=f"select_channel_{action}_{parser_name}_{channel['id']}")])
     keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"settings_{parser_name}")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -25,4 +24,9 @@ def get_interval_selection_kb(parser_name: str):
         [InlineKeyboardButton(text="120 сек", callback_data=f"set_{parser_name}_interval_120")],
         [InlineKeyboardButton(text="300 сек", callback_data=f"set_{parser_name}_interval_300")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data=f"settings_{parser_name}")]
+    ])
+
+def get_back_to_parser_settings_kb(parser_name: str):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к настройкам", callback_data=f"settings_{parser_name}")]
     ])
