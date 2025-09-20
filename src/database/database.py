@@ -156,8 +156,19 @@ class Database:
             CREATE TABLE IF NOT EXISTS parser_settings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 parser_name TEXT UNIQUE NOT NULL,
-                channel_id INTEGER,
                 message_interval INTEGER DEFAULT 120
+            )
+        """)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS parser_channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                parser_name TEXT NOT NULL,
+                channel_id INTEGER NOT NULL,
+                keywords TEXT,
+                minus_words TEXT,
+                min_price INTEGER,
+                max_price INTEGER,
+                UNIQUE(parser_name, channel_id)
             )
         """)
         self.cursor.execute("""
@@ -199,21 +210,12 @@ class Database:
     def get_parser_settings(self, parser_name: str) -> Optional[Dict]:
         """Получить настройки парсера"""
         row = self.cursor.execute(
-            "SELECT channel_id, message_interval FROM parser_settings WHERE parser_name = ?",
+            "SELECT message_interval FROM parser_settings WHERE parser_name = ?",
             (parser_name,)
         ).fetchone()
         if row:
-            return {"channel_id": row[0], "message_interval": row[1]}
+            return {"message_interval": row[0]}
         return None
-
-    def set_parser_channel(self, parser_name: str, channel_id: int):
-        """Установить канал для парсера"""
-        self.cursor.execute(
-            "INSERT INTO parser_settings(parser_name, channel_id) VALUES (?, ?) "
-            "ON CONFLICT(parser_name) DO UPDATE SET channel_id=excluded.channel_id",
-            (parser_name, channel_id)
-        )
-        self.conn.commit()
 
     def set_parser_interval(self, parser_name: str, interval: int):
         """Установить интервал для парсера"""
@@ -224,11 +226,61 @@ class Database:
         )
         self.conn.commit()
 
-    def delete_parser_channel(self, parser_name: str):
+    def add_parser_channel(self, parser_name: str, channel_id: int, keywords: str = '', minus_words: str = '', min_price: int = None, max_price: int = None):
+        """Добавить канал для парсера"""
+        self.cursor.execute(
+            "INSERT INTO parser_channels(parser_name, channel_id, keywords, minus_words, min_price, max_price) VALUES (?, ?, ?, ?, ?, ?)",
+            (parser_name, channel_id, keywords, minus_words, min_price, max_price)
+        )
+        self.conn.commit()
+
+    def get_parser_channels(self, parser_name: str) -> List[Dict]:
+        """Получить все каналы для парсера"""
+        rows = self.cursor.execute(
+            "SELECT id, channel_id, keywords, minus_words, min_price, max_price FROM parser_channels WHERE parser_name = ?",
+            (parser_name,)
+        ).fetchall()
+        return [{"id": row[0], "channel_id": row[1], "keywords": row[2], "minus_words": row[3], "min_price": row[4], "max_price": row[5]} for row in rows]
+
+    def get_parser_channel_settings(self, parser_name: str, channel_id: int) -> Optional[Dict]:
+        """Получить настройки канала для парсера"""
+        row = self.cursor.execute(
+            "SELECT id, keywords, minus_words, min_price, max_price FROM parser_channels WHERE parser_name = ? AND channel_id = ?",
+            (parser_name, channel_id)
+        ).fetchone()
+        if row:
+            return {"id": row[0], "keywords": row[1], "minus_words": row[2], "min_price": row[3], "max_price": row[4]}
+        return None
+
+    def update_parser_channel_price_range(self, id: int, min_price: int, max_price: int):
+        """Обновить ценовой диапазон для канала парсера"""
+        self.cursor.execute(
+            "UPDATE parser_channels SET min_price = ?, max_price = ? WHERE id = ?",
+            (min_price, max_price, id)
+        )
+        self.conn.commit()
+
+    def update_parser_channel_keywords(self, id: int, keywords: str):
+        """Обновить ключевые слова для канала парсера"""
+        self.cursor.execute(
+            "UPDATE parser_channels SET keywords = ? WHERE id = ?",
+            (keywords, id)
+        )
+        self.conn.commit()
+
+    def update_parser_channel_minus_words(self, id: int, minus_words: str):
+        """Обновить минус-слова для канала парсера"""
+        self.cursor.execute(
+            "UPDATE parser_channels SET minus_words = ? WHERE id = ?",
+            (minus_words, id)
+        )
+        self.conn.commit()
+
+    def delete_parser_channel(self, parser_name: str, channel_id: int):
         """Удалить канал для парсера"""
         self.cursor.execute(
-            "UPDATE parser_settings SET channel_id = NULL WHERE parser_name = ?",
-            (parser_name,)
+            "DELETE FROM parser_channels WHERE parser_name = ? AND channel_id = ?",
+            (parser_name, channel_id)
         )
         self.conn.commit()
 

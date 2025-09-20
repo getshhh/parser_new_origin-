@@ -13,63 +13,153 @@ db = Database()
 # меню настроек YouDo
 # -----------------------------
 @router.callback_query(F.data == "settings_youdo")
-async def settings_youdo(callback: CallbackQuery, state: FSMContext = None):
-    settings = db.get_youdo_settings()
+async def settings_youdo(callback: CallbackQuery, state: FSMContext):
     parser_settings = db.get_parser_settings('youdo')
-
-    channel_id = None
-    message_interval = None
-    if parser_settings:
-        channel_id = parser_settings.get("channel_id")
-        message_interval = parser_settings.get("message_interval")
-
-    channel_name = "не задан"
-    if channel_id:
-        try:
-            chat = await callback.bot.get_chat(channel_id)
-            channel_name = f"@{chat.username}" if chat.username else chat.title
-        except Exception:
-            channel_name = f"ID: {channel_id} (нет доступа?)"
-
+    message_interval = parser_settings.get("message_interval") if parser_settings else None
     interval_text = f"{message_interval} сек." if message_interval is not None else "не задан"
 
-    text = f"""
-⚙️ Настройки YouDo:
-🔍 Ключевые слова: {', '.join(settings['keywords']) if settings['keywords'] else 'Не заданы'}
-💰 Мин. цена: {settings['min_price'] if settings['min_price'] else 'Не задана'}
-💰 Макс. цена: {settings['max_price'] if settings['max_price'] else 'Не задана'}
-📢 Канал для отправки: {channel_name}
-⏰ Интервал сообщений: {interval_text}
-    """.strip()
+    channels = db.get_parser_channels('youdo')
 
-    await callback.message.edit_text(text, reply_markup=settings_youdo_kb())
+    channels_info = []
+    if channels:
+        for channel in channels:
+            try:
+                chat = await callback.bot.get_chat(channel["channel_id"])
+                channel_name = f"@{chat.username}" if chat.username else chat.title
+                keywords = channel['keywords'] if channel['keywords'] else 'нет'
+                minus_words = channel['minus_words'] if channel['minus_words'] else 'нет'
+                price_range = f"от {channel['min_price']} до {channel['max_price']}" if channel['min_price'] is not None and channel['max_price'] is not None else 'не задан'
+                channels_info.append(f"▶️ **{channel_name}**\n   - Ключи: *{keywords}*\n   - Минус-слова: *{minus_words}*\n   - Цена: *{price_range}*")
+            except Exception:
+                channels_info.append(f"▶️ ID: {channel['channel_id']} (нет доступа?)")
+
+    settings_text = (
+        "⚙️ **Настройки YouDo**\n\n"
+        f"**Интервал сообщений:** {interval_text}\n\n"
+        "**Подключенные каналы:**\n"
+    )
+    if channels_info:
+        settings_text += "\n\n".join(channels_info)
+    else:
+        settings_text += "Каналы не подключены."
+
+    await callback.message.edit_text(
+        settings_text,
+        reply_markup=settings_youdo_kb(channels),
+        parse_mode="Markdown"
+    )
     await callback.answer()
 
 # -----------------------------
-# изменение ключевых слов
+# Добавление канала
 # -----------------------------
-@router.callback_query(F.data == "set_youdo_keywords")
-async def set_youdo_keywords(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Введите ключевые слова через запятую:")
+@router.callback_query(F.data == "add_youdo_channel")
+async def add_youdo_channel(callback: CallbackQuery):
+    channels = db.list_channels()
+    if not channels:
+        await callback.answer("Бот не является администратором ни в одном канале.", show_alert=True)
+        return
+
+    buttons = [
+        [InlineKeyboardButton(text=title, callback_data=f"youdo_select_channel_{chat_id}")]
+        for chat_id, title in channels
+    ]
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="settings_youdo")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await callback.message.edit_text("Выберите канал для добавления:", reply_markup=keyboard)
+
+@router.callback_query(F.data.startswith("youdo_select_channel_"))
+async def select_youdo_channel(callback: CallbackQuery, state: FSMContext):
+    channel_id = int(callback.data.split("_")[-1])
+    try:
+        db.add_parser_channel('youdo', channel_id)
+        await callback.answer("✅ Канал добавлен!")
+    except Exception as e:
+        await callback.answer(f"❗️ Ошибка при добавлении канала: {e}", show_alert=True)
+    await settings_youdo(callback, state)
+
+# -----------------------------
+# Удаление канала
+# -----------------------------
+@router.callback_query(F.data.startswith("remove_youdo_channel_"))
+async def remove_youdo_channel(callback: CallbackQuery, state: FSMContext):
+    channel_id = int(callback.data.split("_")[-1])
+    db.delete_parser_channel('youdo', channel_id)
+    await callback.answer("✅ Канал удален!")
+    await settings_youdo(callback, state)
+
+# -----------------------------
+# Настройка ключевых слов
+# -----------------------------
+@router.callback_query(F.data.startswith("set_youdo_keywords_"))
+async def set_youdo_keywords_for_channel(callback: CallbackQuery, state: FSMContext):
+    channel_id = int(callback.data.split("_")[-1])
+    await state.update_data(channel_id=channel_id)
+    await callback.message.edit_text("Введите ключевые слова через запятую (или '-', если не нужны):")
     await state.set_state(Form.setting_youdo_keywords)
-    await callback.answer()
 
 @router.message(Form.setting_youdo_keywords)
 async def process_youdo_keywords(message: Message, state: FSMContext):
-    keywords = [kw.strip() for kw in message.text.split(',') if kw.strip()]
-    settings = db.get_youdo_settings()
-    db.save_youdo_settings(keywords, settings.get('min_price'), settings.get('max_price'))
-    await message.answer(f"✅ Ключевые слова для YouDo обновлены: {', '.join(keywords) if keywords else '—'}")
+    data = await state.get_data()
+    channel_id = data.get("channel_id")
+    settings = db.get_parser_channel_settings('youdo', channel_id)
+    if settings:
+        keywords = message.text if message.text != '-' else ''
+        db.update_parser_channel_keywords(settings['id'], keywords)
+        await message.answer("✅ Ключевые слова обновлены.")
     await state.clear()
+
+    # Создаем фейковый CallbackQuery для вызова меню
+    callback_query = type('obj', (object,), {
+        'data': 'settings_youdo',
+        'message': message,
+        'from_user': message.from_user,
+        'bot': message.bot,
+        'answer': lambda: None
+    })
+    await settings_youdo(callback_query, state)
+
+
+# -----------------------------
+# Настройка минус-слов
+# -----------------------------
+@router.callback_query(F.data.startswith("set_youdo_minus_words_"))
+async def set_youdo_minus_words_for_channel(callback: CallbackQuery, state: FSMContext):
+    channel_id = int(callback.data.split("_")[-1])
+    await state.update_data(channel_id=channel_id)
+    await callback.message.edit_text("Введите минус-слова через запятую (или '-', если не нужны):")
+    await state.set_state(Form.setting_youdo_minus_words)
+
+@router.message(Form.setting_youdo_minus_words)
+async def process_youdo_minus_words(message: Message, state: FSMContext):
+    data = await state.get_data()
+    channel_id = data.get("channel_id")
+    settings = db.get_parser_channel_settings('youdo', channel_id)
+    if settings:
+        minus_words = message.text if message.text != '-' else ''
+        db.update_parser_channel_minus_words(settings['id'], minus_words)
+        await message.answer("✅ Минус-слова обновлены.")
+    await state.clear()
+
+    # Создаем фейковый CallbackQuery для вызова меню
+    callback_query = type('obj', (object,), {
+        'data': 'settings_youdo',
+        'message': message,
+        'from_user': message.from_user,
+        'bot': message.bot,
+        'answer': lambda: None
+    })
+    await settings_youdo(callback_query, state)
 
 # -----------------------------
 # изменение диапазона цен
 # -----------------------------
-@router.callback_query(F.data == "set_youdo_price")
+@router.callback_query(F.data.startswith("set_youdo_price_"))
 async def set_youdo_price(callback: CallbackQuery, state: FSMContext):
+    channel_id = int(callback.data.split("_")[-1])
+    await state.update_data(channel_id=channel_id)
     await callback.message.edit_text("Введите минимальную цену:")
     await state.set_state(Form.setting_youdo_price_min)
-    await callback.answer()
 
 @router.message(Form.setting_youdo_price_min)
 async def process_youdo_price_min(message: Message, state: FSMContext):
@@ -86,40 +176,25 @@ async def process_youdo_price_max(message: Message, state: FSMContext):
     try:
         max_price = int(message.text)
         data = await state.get_data()
-        settings = db.get_youdo_settings()
-        db.save_youdo_settings(settings.get('keywords'), data.get('min_price'), max_price)
-        await message.answer(f"✅ Ценовой диапазон для YouDo обновлён: {data.get('min_price')} - {max_price} руб.")
+        channel_id = data.get("channel_id")
+        min_price = data.get("min_price")
+        settings = db.get_parser_channel_settings('youdo', channel_id)
+        if settings:
+            db.update_parser_channel_price_range(settings['id'], min_price, max_price)
+            await message.answer(f"✅ Ценовой диапазон обновлён: {min_price} - {max_price} руб.")
         await state.clear()
+
+        # Создаем фейковый CallbackQuery для вызова меню
+        callback_query = type('obj', (object,), {
+            'data': 'settings_youdo',
+            'message': message,
+            'from_user': message.from_user,
+            'bot': message.bot,
+            'answer': lambda: None
+        })
+        await settings_youdo(callback_query, state)
     except ValueError:
         await message.answer("❌ Введите число!")
-
-# -----------------------------
-# Выбор канала для YouDo
-# -----------------------------
-@router.callback_query(F.data == "set_youdo_channel")
-async def set_youdo_channel(callback: CallbackQuery):
-    channels = db.list_channels()
-    if not channels:
-        await callback.answer("Бот не является администратором ни в одном канале. Добавьте бота в канал как администратора.", show_alert=True)
-        return
-
-    buttons = [
-        [InlineKeyboardButton(text=title, callback_data=f"youdo_channel_select_{chat_id}")]
-        for chat_id, title in channels
-    ]
-    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="settings_youdo")])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    await callback.message.edit_text("Выберите канал для отправки уведомлений YouDo:", reply_markup=keyboard)
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("youdo_channel_select_"))
-async def process_youdo_channel_selection(callback: CallbackQuery, state: FSMContext):
-    channel_id = int(callback.data.split("_")[-1])
-    db.set_parser_channel('youdo', channel_id)
-
-    await callback.answer("✅ Канал для YouDo успешно выбран!")
-    await settings_youdo(callback, state)
 
 # -----------------------------
 # Настройка интервала для YouDo

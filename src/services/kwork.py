@@ -119,6 +119,11 @@ class KworkParserService:
 
     async def _parse_and_send(self) -> None:
         async with self.lock:
+            channel_configs = self.db.get_parser_channels("kwork")
+            if not channel_configs:
+                log.warning("Каналы для парсера Kwork не настроены. Пропускаем парсинг.")
+                return
+
             connector = aiohttp.TCPConnector(limit=8, ssl=False)
             timeout = aiohttp.ClientTimeout(total=TIMEOUT_TOTAL)
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
@@ -144,52 +149,48 @@ class KworkParserService:
                             if not isinstance(items, list):
                                 items = []
 
-                        settings = self.db.get_settings("kwork")
-                        parser_cfg = self.db.get_parser_settings("kwork")
-
-                        # если канал в настройках — туда, иначе тот чат, где включили
-                        target_channel = parser_cfg["channel_id"] if parser_cfg and parser_cfg["channel_id"] else self.chat_id
-
-                        new_items = []
                         for item in items:
                             if isinstance(item, dict):
                                 norm_item = normalize_item(item)
-                                if self._filter_item(norm_item, settings):
-                                    self.db.save_project(norm_item)
-                                    new_items.append(norm_item)
-
-                        if new_items and target_channel:
-                            for item in new_items:
-                                message_text = render(item)
-                                try:
-                                    await self.bot.send_message(chat_id=target_channel, text=message_text)
-                                except TelegramRetryAfter as e:
-                                    log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
-                                    await asyncio.sleep(e.retry_after)
-                                    await self.bot.send_message(chat_id=target_channel, text=message_text)
-                                except Exception as e:
-                                    log.error(f"Не удалось отправить сообщение: {e}")
-                                await asyncio.sleep(1)
+                                self.db.save_project(norm_item)
+                                for config in channel_configs:
+                                    if self._filter_item(norm_item, config):
+                                        message_text = render(norm_item)
+                                        try:
+                                            await self.bot.send_message(chat_id=config['channel_id'], text=message_text)
+                                            new_items_count += 1
+                                        except TelegramRetryAfter as e:
+                                            log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
+                                            await asyncio.sleep(e.retry_after)
+                                            await self.bot.send_message(chat_id=config['channel_id'], text=message_text)
+                                        except Exception as e:
+                                            log.error(f"Не удалось отправить сообщение в канал {config['channel_id']}: {e}")
+                                        await asyncio.sleep(1)
 
                         if not items:
                             break
-                        new_items_count += len(new_items)
                         page += 1
                         await asyncio.sleep(DELAY_SEC)
 
                     except Exception as e:
                         log.error(f"Ошибка парсинга: {e}")
                         break
-            log.info(f"Завершено. Найдено новых проектов: {new_items_count}")
+            log.info(f"Завершено. Отправлено новых проектов: {new_items_count}")
 
     def _filter_item(self, item: Dict[str, Any], settings: dict) -> bool:
-        keywords = settings.get("keywords", [])
+        keywords = settings.get("keywords", "").split(',') if settings.get("keywords") else []
+        minus_words = settings.get("minus_words", "").split(',') if settings.get("minus_words") else []
         min_price = settings.get("min_price")
         max_price = settings.get("max_price")
 
         title_and_desc = (item.get("title", "") + " " + item.get("description", "")).lower()
-        if keywords:
-            if not any(kw.lower() in title_and_desc for kw in keywords):
+
+        if keywords and keywords[0] != '-':
+            if not any(kw.strip().lower() in title_and_desc for kw in keywords):
+                return False
+
+        if minus_words and minus_words[0] != '-':
+            if any(mw.strip().lower() in title_and_desc for mw in minus_words):
                 return False
 
         price = item.get("price")

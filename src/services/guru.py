@@ -92,66 +92,74 @@ class GuruParserService:
 
     async def _parse_and_store(self, chat_id: Optional[int]) -> int:
         async with self.lock:
+            channel_configs = self.db.get_parser_channels("guru")
+            if not channel_configs:
+                log.warning("Каналы для парсера Guru не настроены. Пропускаем парсинг.")
+                return 0
+
             connector = aiohttp.TCPConnector(limit=8, ssl=False)
             timeout = aiohttp.ClientTimeout(total=40)
             async with aiohttp.ClientSession(connector=connector, timeout=timeout, headers=HEADERS) as session:
                 page = 1
-                settings = self.db.get_guru_settings()
-                parser_cfg = self.db.get_parser_settings("guru")
-
-                # если канал в настройках — туда, иначе тот чат, где включили
-                target_channel = parser_cfg["channel_id"] if parser_cfg and parser_cfg.get("channel_id") else chat_id
-
-                keywords = set(kw.lower() for kw in (settings.get("keywords") or []))
-                min_price = settings.get("min_price")
-                max_price = settings.get("max_price")
-
+                new_items_count = 0
                 while page <= PAGE_CAP:
                     items = await self._fetch_page(session, page)
                     if not items:
                         break
 
-                    new_items = []
-                    for it in items:
-                        title_l = (it.get("title") or "").lower()
-                        desc_l = (it.get("description") or "").lower()
-
-                        if keywords and not any(kw in title_l or kw in desc_l for kw in keywords):
-                            continue
-
-                        price = it.get("price")
-                        if min_price is not None and (price is None or price < min_price):
-                            continue
-                        if max_price is not None and (price is not None and price > max_price):
-                            continue
-
-                        self.db.save_guru_project(it)
-                        new_items.append(it)
-
-                    if self.bot and target_channel and new_items:
-                        for item in new_items:
-                            try:
-                                await self.bot.send_message(
-                                    target_channel,
-                                    render(item),
-                                    parse_mode="HTML",
-                                    disable_web_page_preview=True,
-                                )
-                            except TelegramRetryAfter as e:
-                                log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
-                                await asyncio.sleep(e.retry_after)
-                                await self.bot.send_message(
-                                    target_channel,
-                                    render(item),
-                                    parse_mode="HTML",
-                                    disable_web_page_preview=True,
-                                )
-                            except Exception as e:
-                                log.error(f"Failed to send message: {e}")
-                            await asyncio.sleep(1)
+                    for item in items:
+                        self.db.save_guru_project(item)
+                        for config in channel_configs:
+                            if self._filter_item(item, config):
+                                if self.bot:
+                                    try:
+                                        await self.bot.send_message(
+                                            config['channel_id'],
+                                            render(item),
+                                            parse_mode="HTML",
+                                            disable_web_page_preview=True,
+                                        )
+                                        new_items_count += 1
+                                    except TelegramRetryAfter as e:
+                                        log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
+                                        await asyncio.sleep(e.retry_after)
+                                        await self.bot.send_message(
+                                            config['channel_id'],
+                                            render(item),
+                                            parse_mode="HTML",
+                                            disable_web_page_preview=True,
+                                        )
+                                    except Exception as e:
+                                        log.error(f"Failed to send message to channel {config['channel_id']}: {e}")
+                                    await asyncio.sleep(1)
                     page += 1
                     await asyncio.sleep(1)
-                return 0
+                log.info(f"Завершено. Отправлено новых проектов: {new_items_count}")
+                return new_items_count
+
+    def _filter_item(self, item: Dict[str, Any], settings: dict) -> bool:
+        keywords = settings.get("keywords", "").split(',') if settings.get("keywords") else []
+        minus_words = settings.get("minus_words", "").split(',') if settings.get("minus_words") else []
+        min_price = settings.get("min_price")
+        max_price = settings.get("max_price")
+
+        title_and_desc = (item.get("title", "") + " " + item.get("description", "")).lower()
+
+        if keywords and keywords[0] != '-':
+            if not any(kw.strip().lower() in title_and_desc for kw in keywords):
+                return False
+
+        if minus_words and minus_words[0] != '-':
+            if any(mw.strip().lower() in title_and_desc for mw in minus_words):
+                return False
+
+        price = item.get("price")
+        if min_price is not None and (price is None or price < min_price):
+            return False
+        if max_price is not None and (price is not None and price > max_price):
+            return False
+
+        return True
 
     async def _fetch_page(self, session: aiohttp.ClientSession, page: int) -> List[Dict[str, Any]]:
         url = LIST_URL if page == 1 else f"{LIST_URL}?page={page}"
