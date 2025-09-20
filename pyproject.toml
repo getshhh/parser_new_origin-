@@ -1,0 +1,27 @@
+[tool.poetry]
+name = "MyProject"
+version = "0.1.0"
+description = ""
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+aiogram = "^3.3.0"
+pydantic-settings = "^2.1.0"
+cachetools = "^5.3.2"
+aiosqlite = "^0.21.0"
+requests = "^2.32.5"
+bs4 = "^0.0.2"
+selenium = "^4.35.0"
+webdriver-manager = "^4.0.2"
+loguru = "^0.7.3"
+seleniumbase = "^4.41.5"
+fake-useragent = "^2.2.0"
+lxml = "^5.3"
+playwright = "^1.55.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
