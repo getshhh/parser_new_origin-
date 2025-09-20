@@ -96,12 +96,11 @@ class WorkZillaParserService:
 
     async def _parse_and_send(self) -> None:
         async with self.lock:
-            settings = self.db.get_workzilla_settings()
-            parser_cfg = self.db.get_parser_settings("workzilla")
+            channel_configs = self.db.get_parser_channels("workzilla")
+            if not channel_configs:
+                log.warning("Каналы для парсера Work-Zilla не настроены. Пропускаем парсинг.")
+                return
 
-            # если канал в настройках — туда, иначе тот чат, где включили
-            target_channel = parser_cfg["channel_id"] if parser_cfg and parser_cfg.get("channel_id") else self.chat_id
-            
             connector = aiohttp.TCPConnector(limit=8, ssl=False)
             timeout = aiohttp.ClientTimeout(total=TIMEOUT_TOTAL)
             
@@ -122,85 +121,73 @@ class WorkZillaParserService:
                         html = await resp.text()
                     
                     soup = BeautifulSoup(html, "html.parser")
-                    
-                    # Селекторы для Work-Zilla
                     vacancies = soup.select(".vacancies-list_item__pOEbS")
-                    
                     log.info(f"Найдено вакансий: {len(vacancies)}")
                     
-                    new_vacancies = []
                     for v in vacancies:
                         try:
                             blocks = v.select("div.card_content__t4Uk0 > div")
-                            
-                            title = blocks[0].get_text(strip=True) if len(blocks) > 0 else "—"
-                            price = blocks[1].get_text(strip=True) if len(blocks) > 1 else "—"
-                            description = blocks[2].get_text(strip=True) if len(blocks) > 2 else "—"
-                            
-                            # Получаем ссылку
                             link_tag = v.find("a")
-                            url = BASE_URL + link_tag["href"] if link_tag and "href" in link_tag.attrs else ""
 
                             vacancy_data = {
-                                "title": title,
-                                "description": description,
-                                "price": price,
-                                "url": url,
+                                "title": blocks[0].get_text(strip=True) if len(blocks) > 0 else "—",
+                                "price": blocks[1].get_text(strip=True) if len(blocks) > 1 else "—",
+                                "description": blocks[2].get_text(strip=True) if len(blocks) > 2 else "—",
+                                "url": BASE_URL + link_tag["href"] if link_tag and "href" in link_tag.attrs else "",
                                 "date_create": str(time.time())
                             }
                             
                             norm_vacancy = normalize_vacancy(vacancy_data)
-                            if self._filter_vacancy(norm_vacancy, settings):
-                                self.db.save_workzilla_vacancy(norm_vacancy)
-                                new_vacancies.append(norm_vacancy)
-                                
+                            self.db.save_workzilla_vacancy(norm_vacancy)
+
+                            for config in channel_configs:
+                                if self._filter_vacancy(norm_vacancy, config):
+                                    message_text = render_vacancy(norm_vacancy)
+                                    try:
+                                        await self.bot.send_message(chat_id=config['channel_id'], text=message_text)
+                                        new_vacancies_count += 1
+                                    except TelegramRetryAfter as e:
+                                        log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
+                                        await asyncio.sleep(e.retry_after)
+                                        await self.bot.send_message(chat_id=config['channel_id'], text=message_text)
+                                    except Exception as e:
+                                        log.error(f"Не удалось отправить сообщение Work-Zilla в канал {config['channel_id']}: {e}")
+                                    await asyncio.sleep(1)
+
                         except Exception as e:
                             log.error(f"Ошибка обработки вакансии: {e}")
                             continue
                     
-                    if new_vacancies and target_channel:
-                        for vacancy in new_vacancies:
-                            message_text = render_vacancy(vacancy)
-                            try:
-                                await self.bot.send_message(chat_id=target_channel, text=message_text)
-                            except TelegramRetryAfter as e:
-                                log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
-                                await asyncio.sleep(e.retry_after)
-                                await self.bot.send_message(chat_id=target_channel, text=message_text)
-                            except Exception as e:
-                                log.error(f"Не удалось отправить сообщение Work-Zilla: {e}")
-                            await asyncio.sleep(1)
-                    
-                    new_vacancies_count = len(new_vacancies)
-                    log.info(f"Отфильтровано новых вакансий: {new_vacancies_count}")
+                    log.info(f"Отправлено новых вакансий: {new_vacancies_count}")
 
                 except Exception as e:
                     log.error(f"Ошибка парсинга Work-Zilla: {e}", exc_info=True)
             
-            log.info(f"Work-Zilla парсинг завершен. Найдено новых вакансий: {new_vacancies_count}")
+            log.info(f"Work-Zilla парсинг завершен.")
 
     def _filter_vacancy(self, vacancy: Dict[str, Any], settings: dict) -> bool:
-        keywords = settings.get("keywords", [])
+        keywords = settings.get("keywords", "").split(',') if settings.get("keywords") else []
+        minus_words = settings.get("minus_words", "").split(',') if settings.get("minus_words") else []
         min_price = settings.get("min_price")
         max_price = settings.get("max_price")
 
-        # Извлекаем числовое значение цены для фильтрации
+        title_and_desc = (vacancy.get("title", "") + " " + vacancy.get("description", "")).lower()
+
+        if keywords and keywords[0] != '-':
+            if not any(kw.strip().lower() in title_and_desc for kw in keywords):
+                return False
+
+        if minus_words and minus_words[0] != '-':
+            if any(mw.strip().lower() in title_and_desc for mw in minus_words):
+                return False
+
         price_text = vacancy.get("price", "")
         price_value = None
-        
-        # Пытаемся извлечь число из строки с ценой
         if price_text != "Цена не указана" and price_text != "—":
             price_match = re.search(r'\d+', price_text.replace(' ', ''))
             if price_match:
                 price_value = int(price_match.group())
 
-        # Фильтрация по ключевым словам
-        title_and_desc = (vacancy.get("title", "") + " " + vacancy.get("description", "")).lower()
-        if keywords:
-            if not any(kw.lower() in title_and_desc for kw in keywords):
-                return False
-        
-        # Фильтрация по цене
         if min_price is not None and price_value is not None and price_value < min_price:
             return False
         if max_price is not None and price_value is not None and price_value > max_price:

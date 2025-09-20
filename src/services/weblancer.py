@@ -99,12 +99,11 @@ class WebLancerParserService:
 
     async def _parse_and_send(self) -> None:
         async with self.lock:
-            settings = self.db.get_weblancer_settings()
-            parser_cfg = self.db.get_parser_settings("weblancer")
+            channel_configs = self.db.get_parser_channels("weblancer")
+            if not channel_configs:
+                log.warning("Каналы для парсера WebLancer не настроены. Пропускаем парсинг.")
+                return
 
-            # если канал в настройках — туда, иначе тот чат, где включили
-            target_channel = parser_cfg["channel_id"] if parser_cfg and parser_cfg.get("channel_id") else self.chat_id
-            
             connector = aiohttp.TCPConnector(limit=8, ssl=False)
             timeout = aiohttp.ClientTimeout(total=TIMEOUT_TOTAL)
             
@@ -125,96 +124,78 @@ class WebLancerParserService:
                         html = await resp.text()
                     
                     soup = BeautifulSoup(html, "html.parser")
-                    
-                    # Селекторы для WebLancer
                     projects = soup.find_all("article", class_="bg-white")
-
-                    
                     log.info(f"Найдено проектов: {len(projects)}")
                     
-                    new_projects = []
                     for p in projects:
                         try:
-                            # Ищем элементы с проектами
                             title_tag = p.find("a", class_="link-style")
-
                             if not title_tag:
                                 continue
-                                
                             price_tag = p.find("span", class_="text-green-600")
-
                             desc_tag = p.find("p", class_="text-gray-600")
-
                             user_tag = p.find("a", href=lambda x: x and "/users/" in x)
 
-
-                            title = title_tag.get_text(strip=True) if title_tag else "Без названия"
-                            link = BASE_URL + title_tag["href"] if title_tag and "href" in title_tag.attrs else ""
-                            description = desc_tag.get_text(strip=True) if desc_tag else "Нет описания"
-                            price = price_tag.get_text(strip=True) if price_tag else "Цена не указана"
-                            username = user_tag.get_text(strip=True) if user_tag else "Неизвестен"
-
                             project_data = {
-                                "title": title,
-                                "description": description,
-                                "price": price,
-                                "url": link,
-                                "username": username,
+                                "title": title_tag.get_text(strip=True) if title_tag else "Без названия",
+                                "url": BASE_URL + title_tag["href"] if title_tag and "href" in title_tag.attrs else "",
+                                "description": desc_tag.get_text(strip=True) if desc_tag else "Нет описания",
+                                "price": price_tag.get_text(strip=True) if price_tag else "Цена не указана",
+                                "username": user_tag.get_text(strip=True) if user_tag else "Неизвестен",
                                 "date_create": str(time.time())
                             }
                             
                             norm_project = normalize_project(project_data)
-                            if self._filter_project(norm_project, settings):
-                                self.db.save_weblancer_project(norm_project)
-                                new_projects.append(norm_project)
-                                
+                            self.db.save_weblancer_project(norm_project)
+
+                            for config in channel_configs:
+                                if self._filter_project(norm_project, config):
+                                    message_text = render_project(norm_project)
+                                    try:
+                                        await self.bot.send_message(chat_id=config['channel_id'], text=message_text)
+                                        new_projects_count += 1
+                                    except TelegramRetryAfter as e:
+                                        log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
+                                        await asyncio.sleep(e.retry_after)
+                                        await self.bot.send_message(chat_id=config['channel_id'], text=message_text)
+                                    except Exception as e:
+                                        log.error(f"Не удалось отправить сообщение WebLancer в канал {config['channel_id']}: {e}")
+                                    await asyncio.sleep(1)
+
                         except Exception as e:
                             log.error(f"Ошибка обработки проекта: {e}")
                             continue
                     
-                    if new_projects and target_channel:
-                        for project in new_projects:
-                            message_text = render_project(project)
-                            try:
-                                await self.bot.send_message(chat_id=target_channel, text=message_text)
-                            except TelegramRetryAfter as e:
-                                log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
-                                await asyncio.sleep(e.retry_after)
-                                await self.bot.send_message(chat_id=target_channel, text=message_text)
-                            except Exception as e:
-                                log.error(f"Не удалось отправить сообщение WebLancer: {e}")
-                            await asyncio.sleep(1)
-                    
-                    new_projects_count = len(new_projects)
-                    log.info(f"Отфильтровано новых проектов: {new_projects_count}")
+                    log.info(f"Отправлено новых проектов: {new_projects_count}")
 
                 except Exception as e:
                     log.error(f"Ошибка парсинга WebLancer: {e}", exc_info=True)
             
-            log.info(f"WebLancer парсинг завершен. Найдено новых проектов: {new_projects_count}")
+            log.info(f"WebLancer парсинг завершен.")
 
     def _filter_project(self, project: Dict[str, Any], settings: dict) -> bool:
-        keywords = settings.get("keywords", [])
+        keywords = settings.get("keywords", "").split(',') if settings.get("keywords") else []
+        minus_words = settings.get("minus_words", "").split(',') if settings.get("minus_words") else []
         min_price = settings.get("min_price")
         max_price = settings.get("max_price")
 
-        # Извлекаем числовое значение цены для фильтрации
+        title_and_desc = (project.get("title", "") + " " + project.get("description", "")).lower()
+
+        if keywords and keywords[0] != '-':
+            if not any(kw.strip().lower() in title_and_desc for kw in keywords):
+                return False
+
+        if minus_words and minus_words[0] != '-':
+            if any(mw.strip().lower() in title_and_desc for mw in minus_words):
+                return False
+
         price_text = project.get("price", "")
         price_value = None
-        
-        # Пытаемся извлечь число из строки с ценой
         if price_text != "Цена не указана" and price_text != "нет":
             price_match = re.search(r'\d+', price_text.replace(' ', ''))
             if price_match:
                 price_value = int(price_match.group())
 
-        # Фильтрация по ключевым словам
-        title_and_desc = (project.get("title", "") + " " + project.get("description", "")).lower()
-        if keywords:
-            if not any(kw.lower() in title_and_desc for kw in keywords):
-                return False
-        
-        # Фильтрация по цене
         if min_price is not None and price_value is not None and price_value < min_price:
             return False
         if max_price is not None and price_value is not None and price_value > max_price:

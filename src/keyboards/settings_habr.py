@@ -1,11 +1,23 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from typing import List, Dict
 
-def settings_habr_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Изменить ключевые слова", callback_data="set_habr_keywords")],
-        [InlineKeyboardButton(text="💰 Изменить зарплатный диапазон", callback_data="set_habr_salary")],
-        [InlineKeyboardButton(text="📍 Изменить города", callback_data="set_habr_cities")],
-        [InlineKeyboardButton(text="📢 Выбрать канал", callback_data="set_habr_channel")],
-        [InlineKeyboardButton(text="⏰ Настроить интервал", callback_data="set_habr_interval")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main_settings")]
-    ])
+def settings_habr_kb(channels: List[Dict]) -> InlineKeyboardMarkup:
+    buttons = []
+    for channel in channels:
+        channel_id = channel['channel_id']
+        buttons.extend([
+            [
+                InlineKeyboardButton(text="🔑 Ключи", callback_data=f"set_habr_keywords_{channel_id}"),
+                InlineKeyboardButton(text="⛔️ Минус-слова", callback_data=f"set_habr_minus_words_{channel_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="💰 Зарплата", callback_data=f"set_habr_salary_{channel_id}"),
+                InlineKeyboardButton(text="🗑 Удалить", callback_data=f"remove_habr_channel_{channel_id}")
+            ]
+        ])
+
+    buttons.append([InlineKeyboardButton(text="➕ Добавить канал", callback_data="add_habr_channel")])
+    buttons.append([InlineKeyboardButton(text="⏰ Настроить интервал", callback_data="set_habr_interval")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main_settings")])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
