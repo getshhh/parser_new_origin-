@@ -9,8 +9,14 @@ from keyboards.settings_workzilla import settings_workzilla_kb
 router = Router()
 db = Database()
 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
 @router.callback_query(F.data == "settings_workzilla")
 async def settings_workzilla(callback: CallbackQuery, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is not None:
+        await state.clear()
+
     settings = db.get_workzilla_settings()
     min_price = settings.get("min_price", None)
     max_price = settings.get("max_price", None)
@@ -39,7 +45,10 @@ async def channel_settings_workzilla(callback: CallbackQuery, state: FSMContext)
 
 @router.callback_query(F.data == "set_workzilla_price")
 async def set_workzilla_price(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Введите минимальную цену:")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_workzilla")]
+    ])
+    await callback.message.edit_text("Введите минимальную цену:", reply_markup=keyboard)
     await state.set_state(Form.workzilla_price_min)
     await callback.answer()
 
@@ -48,10 +57,16 @@ async def process_workzilla_price_min(message: Message, state: FSMContext):
     try:
         min_price = int(message.text)
         await state.update_data(min_price=min_price)
-        await message.answer("Теперь введите максимальную цену:")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_workzilla")]
+        ])
+        await message.answer("Теперь введите максимальную цену:", reply_markup=keyboard)
         await state.set_state(Form.workzilla_price_max)
     except ValueError:
-        await message.answer("❌ Введите число!")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_workzilla")]
+        ])
+        await message.answer("❌ Введите число!", reply_markup=keyboard)
 
 @router.message(Form.workzilla_price_max)
 async def process_workzilla_price_max(message: Message, state: FSMContext):
@@ -63,7 +78,10 @@ async def process_workzilla_price_max(message: Message, state: FSMContext):
         await message.answer(f"✅ Ценовой диапазон Work-Zilla обновлён: {data.get('min_price')} - {max_price} руб.")
         await state.clear()
     except ValueError:
-        await message.answer("❌ Введите число!")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_workzilla")]
+        ])
+        await message.answer("❌ Введите число!", reply_markup=keyboard)
 
 
 # -----------------------------

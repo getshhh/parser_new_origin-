@@ -16,13 +16,11 @@ router = Router()
 db = Database()
 
 
-@router.callback_query(F.data.startswith("settings_"))
-async def parser_settings(callback: CallbackQuery, state: FSMContext):
-    parser_name = callback.data.split("_")[1]
+async def _show_parser_settings(callback: CallbackQuery, state: FSMContext, parser_name: str):
     await state.update_data(parser_name=parser_name)
 
     channels = db.get_parser_channels(parser_name)
-    text = f"⚙️ Настройки парсера: {parser_name.upper()}\n\n"
+    text = f"⚙️ Настройки каналов парсера: {parser_name.upper()}\n\n"
     if not channels:
         text += "Каналы для отправки не настроены."
     else:
@@ -43,6 +41,12 @@ async def parser_settings(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.edit_text(text, reply_markup=get_parser_settings_kb(parser_name))
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("channel_settings_"))
+async def parser_settings(callback: CallbackQuery, state: FSMContext):
+    parser_name = callback.data.split("_")[2]
+    await _show_parser_settings(callback, state, parser_name)
 
 
 @router.callback_query(F.data.startswith("add_channel_"))

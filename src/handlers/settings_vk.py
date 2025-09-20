@@ -10,8 +10,14 @@ import re
 router = Router()
 db = Database()
 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
 @router.callback_query(F.data == "settings_vk")
 async def settings_vk(callback: CallbackQuery, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is not None:
+        await state.clear()
+
     settings = db.get_vk_settings()
     min_price = settings.get("min_price", None)
     max_price = settings.get("max_price", None)
@@ -45,7 +51,10 @@ async def channel_settings_vk(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "set_vk_price")
 async def set_vk_price(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Введите минимальную цену:")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_vk")]
+    ])
+    await callback.message.edit_text("Введите минимальную цену:", reply_markup=keyboard)
     await state.set_state(Form.vk_price_min)
     await callback.answer()
 
@@ -54,10 +63,16 @@ async def process_vk_price_min(message: Message, state: FSMContext):
     try:
         min_price = int(message.text)
         await state.update_data(min_price=min_price)
-        await message.answer("Теперь введите максимальную цену:")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_vk")]
+        ])
+        await message.answer("Теперь введите максимальную цену:", reply_markup=keyboard)
         await state.set_state(Form.vk_price_max)
     except ValueError:
-        await message.answer("❌ Введите число!")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_vk")]
+        ])
+        await message.answer("❌ Введите число!", reply_markup=keyboard)
 
 @router.message(Form.vk_price_max)
 async def process_vk_price_max(message: Message, state: FSMContext):
@@ -69,14 +84,20 @@ async def process_vk_price_max(message: Message, state: FSMContext):
         await message.answer(f"✅ Ценовой диапазон VK обновлён: {data.get('min_price')} - {max_price} руб.")
         await state.clear()
     except ValueError:
-        await message.answer("❌ Введите число!")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_vk")]
+        ])
+        await message.answer("❌ Введите число!", reply_markup=keyboard)
 
 # -----------------------------
 # изменение ID групп
 # -----------------------------
 @router.callback_query(F.data == "set_vk_groups")
 async def set_vk_groups(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Введите ID групп через запятую (например: -123456, -654321):")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_vk")]
+    ])
+    await callback.message.edit_text("Введите ID групп через запятую (например: -123456, -654321):", reply_markup=keyboard)
     await state.set_state(Form.vk_groups)
     await callback.answer()
 
@@ -101,4 +122,7 @@ async def process_vk_groups(message: Message, state: FSMContext):
         await message.answer(f"✅ ID групп VK обновлены: {', '.join(group_ids)}")
         await state.clear()
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_vk")]
+        ])
+        await message.answer(f"❌ Ошибка: {e}", reply_markup=keyboard)

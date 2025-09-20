@@ -9,8 +9,14 @@ from keyboards.settings_habr import settings_habr_kb
 router = Router()
 db = Database()
 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
 @router.callback_query(F.data == "settings_habr")
 async def settings_habr(callback: CallbackQuery, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is not None:
+        await state.clear()
+
     settings = db.get_habr_settings()
     min_salary = settings.get("min_salary", None)
     max_salary = settings.get("max_salary", None)
@@ -44,7 +50,10 @@ async def channel_settings_habr(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "set_habr_salary")
 async def set_habr_salary(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Введите минимальную зарплату:")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_habr")]
+    ])
+    await callback.message.edit_text("Введите минимальную зарплату:", reply_markup=keyboard)
     await state.set_state(Form.setting_habr_salary_min)
     await callback.answer()
 
@@ -53,10 +62,16 @@ async def process_habr_salary_min(message: Message, state: FSMContext):
     try:
         min_salary = int(message.text)
         await state.update_data(min_salary=min_salary)
-        await message.answer("Теперь введите максимальную зарплату:")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_habr")]
+        ])
+        await message.answer("Теперь введите максимальную зарплату:", reply_markup=keyboard)
         await state.set_state(Form.setting_habr_salary_max)
     except ValueError:
-        await message.answer("❌ Введите число!")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_habr")]
+        ])
+        await message.answer("❌ Введите число!", reply_markup=keyboard)
 
 @router.message(Form.setting_habr_salary_max)
 async def process_habr_salary_max(message: Message, state: FSMContext):
@@ -74,14 +89,20 @@ async def process_habr_salary_max(message: Message, state: FSMContext):
         await message.answer(f"✅ Зарплатный диапазон обновлён: {data.get('min_salary')} - {max_salary} руб.")
         await state.clear()
     except ValueError:
-        await message.answer("❌ Введите число!")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_habr")]
+        ])
+        await message.answer("❌ Введите число!", reply_markup=keyboard)
 
 # -----------------------------
 # изменение городов
 # -----------------------------
 @router.callback_query(F.data == "set_habr_cities")
 async def set_habr_cities(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Введите города через запятую (оставьте пустым для всех):")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_habr")]
+    ])
+    await callback.message.edit_text("Введите города через запятую (оставьте пустым для всех):", reply_markup=keyboard)
     await state.set_state(Form.setting_habr_cities)
     await callback.answer()
 

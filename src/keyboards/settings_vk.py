@@ -3,6 +3,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 def settings_vk_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Настройки каналов", callback_data="channel_settings_vk")],
         [InlineKeyboardButton(text="💰 Изменить ценовой диапазон", callback_data="set_vk_price")],
         [InlineKeyboardButton(text="👥 Изменить ID групп", callback_data="set_vk_groups")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main_settings")]

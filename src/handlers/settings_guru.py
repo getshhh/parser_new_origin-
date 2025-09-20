@@ -9,8 +9,14 @@ from keyboards.settings_guru import settings_guru_kb
 router = Router()
 db = Database()
 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
 @router.callback_query(F.data == "settings_guru")
 async def settings_guru(callback: CallbackQuery, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is not None:
+        await state.clear()
+
     settings = db.get_guru_settings()
     min_price = settings.get("min_price", None)
     max_price = settings.get("max_price", None)
@@ -42,7 +48,10 @@ async def channel_settings_guru(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "set_guru_price")
 async def set_guru_price(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Введите минимальную цену (USD):")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_guru")]
+    ])
+    await callback.message.edit_text("Введите минимальную цену (USD):", reply_markup=keyboard)
     await state.set_state(Form.setting_guru_price_min)
     await callback.answer()
 
@@ -51,10 +60,16 @@ async def process_guru_price_min(message: Message, state: FSMContext):
     try:
         min_price = int(message.text)
         await state.update_data(min_price=min_price)
-        await message.answer("Теперь введите максимальную цену (USD):")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_guru")]
+        ])
+        await message.answer("Теперь введите максимальную цену (USD):", reply_markup=keyboard)
         await state.set_state(Form.setting_guru_price_max)
     except ValueError:
-        await message.answer("❌ Введите число!")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_guru")]
+        ])
+        await message.answer("❌ Введите число!", reply_markup=keyboard)
 
 @router.message(Form.setting_guru_price_max)
 async def process_guru_price_max(message: Message, state: FSMContext):
@@ -66,4 +81,7 @@ async def process_guru_price_max(message: Message, state: FSMContext):
         await message.answer(f"✅ Ценовой диапазон для Guru обновлён: {data.get('min_price')} - {max_price} USD")
         await state.clear()
     except ValueError:
-        await message.answer("❌ Введите число!")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_guru")]
+        ])
+        await message.answer("❌ Введите число!", reply_markup=keyboard)
