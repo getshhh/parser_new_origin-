@@ -49,7 +49,12 @@ class YouDoParserService:
     async def _run_loop(self, chat_id: Optional[int]) -> None:
         while self.is_running:
             try:
-                await self._parse_and_store(chat_id)
+                channels = self.db.get_parser_channels("youdo")
+                if not channels:
+                    log.info("Нет настроенных каналов для YouDo. Парсер не будет запущен.")
+                    return
+
+                await self._parse_and_store(channels)
                 # ⚡️ тянем интервал из БД
                 settings = self.db.get_parser_settings("youdo")
                 interval = settings["message_interval"] if settings else config.PARSING_INTERVAL
@@ -60,15 +65,9 @@ class YouDoParserService:
                 log.error(f"YouDo parser error: {e}", exc_info=True)
                 await asyncio.sleep(60) # Fallback sleep
 
-    async def _parse_and_store(self, chat_id: Optional[int]) -> None:
+    async def _parse_and_store(self, channels: List[Dict]) -> None:
         async with self.lock:
             settings = self.db.get_youdo_settings()
-            parser_cfg = self.db.get_parser_settings("youdo")
-
-            # если канал в настройках — туда, иначе тот чат, где включили
-            target_channel = parser_cfg["channel_id"] if parser_cfg and parser_cfg.get("channel_id") else chat_id
-
-            keywords = set(kw.lower() for kw in (settings.get("keywords") or []))
             min_price = settings.get("min_price")
             max_price = settings.get("max_price")
 
@@ -89,68 +88,94 @@ class YouDoParserService:
                     data = await resp.json()
                     items = data.get("ResultObject", {}).get("Items", [])
 
-                    new_tasks = []
+                    unique_new_tasks = []
                     for item in items:
-                        title = item.get("Name", "")
-                        desc = item.get("Description", "")
-                        title_l, desc_l = title.lower(), desc.lower()
+                        is_new = False
+                        for channel_config in channels:
+                            title = item.get("Name", "")
+                            desc = item.get("Description", "")
+                            title_l, desc_l = title.lower(), desc.lower()
+                            text_for_filter = title_l + " " + desc_l
+                            keywords = set(kw.lower() for kw in (channel_config.get("keywords") or []))
+                            minus_keywords = set(kw.lower() for kw in (channel_config.get("minus_keywords") or []))
 
-                        # фильтр по ключевым словам
-                        if keywords and not any(kw in title_l or kw in desc_l for kw in keywords):
-                            continue
+                            if keywords and not any(kw in text_for_filter for kw in keywords):
+                                continue
+                            if minus_keywords and any(kw in text_for_filter for kw in minus_keywords):
+                                continue
 
-                        # бюджет
-                        budget = item.get("Budget")
-                        if min_price is not None and (budget is None or budget < min_price):
-                            continue
-                        if max_price is not None and (budget is not None and budget > max_price):
-                            continue
+                            budget = item.get("Budget")
+                            if min_price is not None and (budget is None or budget < min_price):
+                                continue
+                            if max_price is not None and (budget is not None and budget > max_price):
+                                continue
 
-                        task = {
-                            "id": item.get("Id"),
-                            "title": title,
-                            "description": desc,
-                            "address": item.get("Address"),
-                            "budget": item.get("BudgetDescription"),
-                            "date": item.get("DateTimeString"),
-                            "url": f"https://youdo.com{item.get('Url')}",
-                            "date_create": datetime.utcnow().isoformat(timespec="seconds"),
-                        }
+                            is_new = True
+                            break
 
+                        if is_new:
+                            task = {
+                                "id": item.get("Id"),
+                                "title": item.get("Name", ""),
+                                "description": item.get("Description", ""),
+                                "address": item.get("Address"),
+                                "budget": item.get("BudgetDescription"),
+                                "date": item.get("DateTimeString"),
+                                "url": f"https://youdo.com{item.get('Url')}",
+                                "date_create": datetime.utcnow().isoformat(timespec="seconds"),
+                            }
+                            unique_new_tasks.append(task)
+
+                    for task in unique_new_tasks:
                         self.db.save_youdo_task(task)
-                        new_tasks.append(task)
 
-                    if self.bot and target_channel and new_tasks:
-                        for task in new_tasks:
-                            try:
-                                await self.bot.send_message(
-                                    target_channel, render(task),
-                                    parse_mode="HTML",
-                                    disable_web_page_preview=True
-                                )
-                            except TelegramRetryAfter as e:
-                                log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
-                                await asyncio.sleep(e.retry_after)
-                                await self.bot.send_message(
-                                    target_channel, render(task),
-                                    parse_mode="HTML",
-                                    disable_web_page_preview=True
-                                )
-                            except Exception as e:
-                                log.error(f"Failed to send message: {e}")
-                            await asyncio.sleep(1)
+                    for channel_config in channels:
+                        target_channel = channel_config["channel_id"]
+                        new_tasks_for_channel = []
+                        for task in unique_new_tasks:
+                            title = task.get("title", "")
+                            desc = task.get("description", "")
+                            title_l, desc_l = title.lower(), desc.lower()
+                            text_for_filter = title_l + " " + desc_l
+                            keywords = set(kw.lower() for kw in (channel_config.get("keywords") or []))
+                            minus_keywords = set(kw.lower() for kw in (channel_config.get("minus_keywords") or []))
 
-    # 🔹 Новые методы управления настройками
-    async def set_keywords(self, keywords: List[str]) -> None:
-        settings = self.db.get_youdo_settings()
-        self.db.save_youdo_settings(
-            keywords, settings["min_price"], settings["max_price"]
-        )
-        log.info(f"YouDo keywords set: {keywords}")
+                            if keywords and not any(kw in text_for_filter for kw in keywords):
+                                continue
+                            if minus_keywords and any(kw in text_for_filter for kw in minus_keywords):
+                                continue
+
+                            budget = item.get("Budget")
+                            if min_price is not None and (budget is None or budget < min_price):
+                                continue
+                            if max_price is not None and (budget is not None and budget > max_price):
+                                continue
+
+                            new_tasks_for_channel.append(task)
+
+                        if self.bot and target_channel and new_tasks_for_channel:
+                            for task in new_tasks_for_channel:
+                                try:
+                                    await self.bot.send_message(
+                                        target_channel, render(task),
+                                        parse_mode="HTML",
+                                        disable_web_page_preview=True
+                                    )
+                                except TelegramRetryAfter as e:
+                                    log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
+                                    await asyncio.sleep(e.retry_after)
+                                    await self.bot.send_message(
+                                        target_channel, render(task),
+                                        parse_mode="HTML",
+                                        disable_web_page_preview=True
+                                    )
+                                except Exception as e:
+                                    log.error(f"Failed to send message: {e}")
+                                await asyncio.sleep(1)
 
     async def set_price_range(self, min_price: int, max_price: int) -> None:
         settings = self.db.get_youdo_settings()
         self.db.save_youdo_settings(
-            settings["keywords"], min_price, max_price
+            settings.get("keywords", []), min_price, max_price
         )
         log.info(f"YouDo price range set: {min_price}-{max_price}")

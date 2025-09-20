@@ -79,7 +79,12 @@ class GuruParserService:
     async def _run_loop(self, chat_id: Optional[int]) -> None:
         while self.is_running:
             try:
-                await self._parse_and_store(chat_id)
+                channels = self.db.get_parser_channels("guru")
+                if not channels:
+                    log.info("Нет настроенных каналов для Guru. Парсер не будет запущен.")
+                    return
+
+                await self._parse_and_store(channels)
                 # ⚡️ тянем интервал из БД
                 settings = self.db.get_parser_settings("guru")
                 interval = settings["message_interval"] if settings else config.PARSING_INTERVAL
@@ -90,19 +95,13 @@ class GuruParserService:
                 log.error(f"Guru parser error: {e}", exc_info=True)
                 await asyncio.sleep(60) # Fallback sleep
 
-    async def _parse_and_store(self, chat_id: Optional[int]) -> int:
+    async def _parse_and_store(self, channels: List[Dict]) -> int:
         async with self.lock:
             connector = aiohttp.TCPConnector(limit=8, ssl=False)
             timeout = aiohttp.ClientTimeout(total=40)
             async with aiohttp.ClientSession(connector=connector, timeout=timeout, headers=HEADERS) as session:
                 page = 1
                 settings = self.db.get_guru_settings()
-                parser_cfg = self.db.get_parser_settings("guru")
-
-                # если канал в настройках — туда, иначе тот чат, где включили
-                target_channel = parser_cfg["channel_id"] if parser_cfg and parser_cfg.get("channel_id") else chat_id
-
-                keywords = set(kw.lower() for kw in (settings.get("keywords") or []))
                 min_price = settings.get("min_price")
                 max_price = settings.get("max_price")
 
@@ -111,44 +110,53 @@ class GuruParserService:
                     if not items:
                         break
 
-                    new_items = []
-                    for it in items:
-                        title_l = (it.get("title") or "").lower()
-                        desc_l = (it.get("description") or "").lower()
+                    for channel_config in channels:
+                        target_channel = channel_config["channel_id"]
+                        keywords = set(kw.lower() for kw in (channel_config.get("keywords") or []))
+                        minus_keywords = set(kw.lower() for kw in (channel_config.get("minus_keywords") or []))
 
-                        if keywords and not any(kw in title_l or kw in desc_l for kw in keywords):
-                            continue
+                        new_items = []
+                        for it in items:
+                            title_l = (it.get("title") or "").lower()
+                            desc_l = (it.get("description") or "").lower()
+                            text_for_filter = title_l + " " + desc_l
 
-                        price = it.get("price")
-                        if min_price is not None and (price is None or price < min_price):
-                            continue
-                        if max_price is not None and (price is not None and price > max_price):
-                            continue
+                            if keywords and not any(kw in text_for_filter for kw in keywords):
+                                continue
 
-                        self.db.save_guru_project(it)
-                        new_items.append(it)
+                            if minus_keywords and any(kw in text_for_filter for kw in minus_keywords):
+                                continue
 
-                    if self.bot and target_channel and new_items:
-                        for item in new_items:
-                            try:
-                                await self.bot.send_message(
-                                    target_channel,
-                                    render(item),
-                                    parse_mode="HTML",
-                                    disable_web_page_preview=True,
-                                )
-                            except TelegramRetryAfter as e:
-                                log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
-                                await asyncio.sleep(e.retry_after)
-                                await self.bot.send_message(
-                                    target_channel,
-                                    render(item),
-                                    parse_mode="HTML",
-                                    disable_web_page_preview=True,
-                                )
-                            except Exception as e:
-                                log.error(f"Failed to send message: {e}")
-                            await asyncio.sleep(1)
+                            price = it.get("price")
+                            if min_price is not None and (price is None or price < min_price):
+                                continue
+                            if max_price is not None and (price is not None and price > max_price):
+                                continue
+
+                            self.db.save_guru_project(it)
+                            new_items.append(it)
+
+                        if self.bot and target_channel and new_items:
+                            for item in new_items:
+                                try:
+                                    await self.bot.send_message(
+                                        target_channel,
+                                        render(item),
+                                        parse_mode="HTML",
+                                        disable_web_page_preview=True,
+                                    )
+                                except TelegramRetryAfter as e:
+                                    log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
+                                    await asyncio.sleep(e.retry_after)
+                                    await self.bot.send_message(
+                                        target_channel,
+                                        render(item),
+                                        parse_mode="HTML",
+                                        disable_web_page_preview=True,
+                                    )
+                                except Exception as e:
+                                    log.error(f"Failed to send message: {e}")
+                                await asyncio.sleep(1)
                     page += 1
                     await asyncio.sleep(1)
                 return 0

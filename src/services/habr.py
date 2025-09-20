@@ -32,42 +32,62 @@ class HabrParserService:
         
         while self.is_running:
             try:
-                vacancies = await self.extract_habr_vacancies()
-                
-                parser_cfg = self.db.get_parser_settings("habr")
-                target_channel = parser_cfg["channel_id"] if parser_cfg and parser_cfg.get("channel_id") else chat_id
+                channels = self.db.get_parser_channels("habr")
+                if not channels:
+                    log.info("Нет настроенных каналов для Habr. Парсер не будет запущен.")
+                    break
 
-                new_vacancies = 0
-                if self.bot and target_channel and vacancies:
-                    for vacancy in vacancies:
-                        self.db.save_habr_vacancy(vacancy)
-                        new_vacancies += 1
-                        message = self.render_vacancy(vacancy)
-                        try:
-                            await self.bot.send_message(target_channel, message)
-                        except TelegramRetryAfter as e:
-                            log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
-                            await asyncio.sleep(e.retry_after)
-                            await self.bot.send_message(target_channel, message)
-                        except Exception as e:
-                            log.error(f"Failed to send message: {e}")
-                        await asyncio.sleep(1)
+                all_vacancies = await self.extract_habr_vacancies()
+
+                unique_new_vacancies = []
+                for vacancy in all_vacancies:
+                    is_new = False
+                    for channel_config in channels:
+                        if self._filter_vacancy(vacancy, channel_config):
+                            is_new = True
+                            break
+                    if is_new:
+                        unique_new_vacancies.append(vacancy)
                 
-                if new_vacancies > 0 and self.bot and target_channel:
+                for vacancy in unique_new_vacancies:
+                    self.db.save_habr_vacancy(vacancy)
+
+                total_new_vacancies = len(unique_new_vacancies)
+                for channel_config in channels:
+                    target_channel = channel_config["channel_id"]
+
+                    new_vacancies_for_channel = []
+                    for vacancy in unique_new_vacancies:
+                        if self._filter_vacancy(vacancy, channel_config):
+                            new_vacancies_for_channel.append(vacancy)
+
+                    if self.bot and target_channel and new_vacancies_for_channel:
+                        for vacancy in new_vacancies_for_channel:
+                            message = self.render_vacancy(vacancy)
+                            try:
+                                await self.bot.send_message(target_channel, message)
+                            except TelegramRetryAfter as e:
+                                log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
+                                await asyncio.sleep(e.retry_after)
+                                await self.bot.send_message(target_channel, message)
+                            except Exception as e:
+                                log.error(f"Failed to send message: {e}")
+                            await asyncio.sleep(1)
+
+                if total_new_vacancies > 0 and self.bot and chat_id: # уведомление в админский чат
                     try:
-                        await self.bot.send_message(target_channel, f"✅ Найдено {new_vacancies} новых вакансий на Habr")
+                        await self.bot.send_message(chat_id, f"✅ Найдено {total_new_vacancies} новых вакансий на Habr и отправлено по каналам.")
                     except TelegramRetryAfter as e:
                         log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
                         await asyncio.sleep(e.retry_after)
-                        await self.bot.send_message(target_channel, f"✅ Найдено {new_vacancies} новых вакансий на Habr")
+                        await self.bot.send_message(chat_id, f"✅ Найдено {total_new_vacancies} новых вакансий на Habr и отправлено по каналам.")
                 
-                # ⚡️ тянем интервал из БД
                 settings = self.db.get_parser_settings("habr")
-                interval = settings["message_interval"] if settings else 300 # 5 минут по умолчанию
+                interval = settings["message_interval"] if settings else 300
                 await asyncio.sleep(interval)
                 
             except Exception as e:
-                log.error(f"Ошибка в парсере Habr: {e}")
+                log.error(f"Ошибка в парсере Habr: {e}", exc_info=True)
                 if self.bot and chat_id:
                     await self.bot.send_message(chat_id, f"❌ Ошибка в парсере Habr: {e}")
                 await asyncio.sleep(60)
@@ -80,20 +100,12 @@ class HabrParserService:
     async def extract_habr_vacancies(self):
         try:
             settings = self.db.get_habr_settings()
-            keywords = settings["keywords"]
-            min_salary = settings["min_salary"]
-            max_salary = settings["max_salary"]
-            cities = settings["cities"]
+            min_salary = settings.get("min_salary")
+            max_salary = settings.get("max_salary")
+            cities = settings.get("cities")
             
-            # Формируем URL с учетом фильтров
             base_url = "https://career.habr.com/vacancies"
-            params = {
-                "q": " ".join(keywords) if keywords else None,
-                "type": "all"
-            }
-            
-            # Убираем None значения
-            params = {k: v for k, v in params.items() if v is not None}
+            params = {"type": "all"}
             
             async with self.session.get(base_url, params=params) as response:
                 response.raise_for_status()
@@ -106,36 +118,27 @@ class HabrParserService:
             
             for card in vacancy_cards:
                 try:
-                    # Заголовок и ссылка
                     title_element = card.find('a', class_='vacancy-card__title-link')
                     title = title_element.get_text(strip=True) if title_element else "No title"
                     link = urljoin('https://career.habr.com', title_element.get('href')) if title_element else None
                     
-                    # Компания
                     company_element = card.find('div', class_='vacancy-card__company')
                     company = company_element.get_text(strip=True) if company_element else "Unknown company"
                     
-                    # Зарплата
-                    salary_element = card.find('div', class_='basic-salary')
-                    if not salary_element:
-                        salary_element = card.find('div', class_='vacancy-card__salary')
+                    salary_element = card.find('div', class_='basic-salary') or card.find('div', class_='vacancy-card__salary')
                     salary = salary_element.get_text(strip=True) if salary_element else "Не указана"
                     
-                    # Город
                     city = "Не указан"
                     meta_element = card.find('div', class_='vacancy-card__meta')
                     if meta_element:
                         meta_items = meta_element.find_all(['a', 'div'])
                         for item in meta_items:
                             text = item.get_text(strip=True)
-                            if (len(text) > 2 and 
-                                not any(char.isdigit() for char in text) and
-                                text != company and
-                                text not in ['Удалённо', 'Офис', 'Гибрид']):
+                            if (len(text) > 2 and not any(char.isdigit() for char in text) and
+                                text != company and text not in ['Удалённо', 'Офис', 'Гибрид']):
                                 city = text
                                 break
                     
-                    # Теги/навыки
                     tags = []
                     skills_element = card.find('div', class_='vacancy-card__skills')
                     if skills_element:
@@ -145,14 +148,11 @@ class HabrParserService:
                             if tag_text != city:
                                 tags.append(tag_text)
                     
-                    # Фильтрация по городу
                     if cities and city not in cities and city != "Не указан":
                         continue
                     
-                    # Фильтрация по зарплате (если указана)
                     if salary != "Не указана" and min_salary is not None:
                         try:
-                            # Пытаемся извлечь числовое значение зарплаты
                             salary_num = int(''.join(filter(str.isdigit, salary.split()[0])))
                             if salary_num < min_salary:
                                 continue
@@ -162,12 +162,8 @@ class HabrParserService:
                             pass
                     
                     vacancies.append({
-                        'title': title,
-                        'link': link,
-                        'company': company,
-                        'salary': salary,
-                        'city': city,
-                        'tags': tags,
+                        'title': title, 'link': link, 'company': company,
+                        'salary': salary, 'city': city, 'tags': tags,
                     })
                     
                 except Exception as e:
@@ -177,9 +173,23 @@ class HabrParserService:
             return vacancies
             
         except Exception as e:
-            log.error(f"Ошибка при извлечении вакансий: {e}")
+            log.error(f"Ошибка при извлечении вакансий: {e}", exc_info=True)
             return []
-    
+
+    def _filter_vacancy(self, vacancy, channel_config):
+        keywords = channel_config.get("keywords", [])
+        minus_keywords = channel_config.get("minus_keywords", [])
+
+        text_for_filter = (vacancy['title'] + ' ' + ' '.join(vacancy['tags'])).lower()
+
+        if keywords and not any(kw.lower() in text_for_filter for kw in keywords):
+            return False
+
+        if minus_keywords and any(kw.lower() in text_for_filter for kw in minus_keywords):
+            return False
+
+        return True
+
     def render_vacancy(self, vacancy):
         tags_text = ', '.join(vacancy['tags']) if vacancy['tags'] else 'Нет тегов'
         return f"""
@@ -190,16 +200,6 @@ class HabrParserService:
 🔖 Теги: {tags_text}
 🔗 Ссылка: {vacancy['link']}
         """.strip()
-    
-    async def set_habr_keywords(self, keywords):
-        settings = self.db.get_habr_settings()
-        self.db.save_habr_settings(
-            keywords=keywords,
-            min_salary=settings["min_salary"],
-            max_salary=settings["max_salary"],
-            cities=settings["cities"],
-            employment_types=settings["employment_types"]
-        )
     
     async def set_habr_salary_range(self, min_salary, max_salary):
         settings = self.db.get_habr_settings()

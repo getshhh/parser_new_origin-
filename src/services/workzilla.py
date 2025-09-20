@@ -82,7 +82,12 @@ class WorkZillaParserService:
     async def _parsing_loop(self) -> None:
         while self.is_running:
             try:
-                await self._parse_and_send()
+                channels = self.db.get_parser_channels("workzilla")
+                if not channels:
+                    log.info("Нет настроенных каналов для Work-Zilla. Парсер не будет запущен.")
+                    return
+
+                await self._parse_and_send(channels)
                 # ⚡️ тянем интервал из БД
                 settings = self.db.get_parser_settings("workzilla")
                 interval = settings["message_interval"] if settings else config.PARSING_INTERVAL
@@ -94,20 +99,15 @@ class WorkZillaParserService:
                 log.error(f"Ошибка в цикле парсинга Work-Zilla: {e}", exc_info=True)
                 await asyncio.sleep(60)
 
-    async def _parse_and_send(self) -> None:
+    async def _parse_and_send(self, channels: List[Dict]) -> None:
         async with self.lock:
             settings = self.db.get_workzilla_settings()
-            parser_cfg = self.db.get_parser_settings("workzilla")
-
-            # если канал в настройках — туда, иначе тот чат, где включили
-            target_channel = parser_cfg["channel_id"] if parser_cfg and parser_cfg.get("channel_id") else self.chat_id
             
             connector = aiohttp.TCPConnector(limit=8, ssl=False)
             timeout = aiohttp.ClientTimeout(total=TIMEOUT_TOTAL)
             
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
                 new_vacancies_count = 0
-                
                 try:
                     url = f"{BASE_URL}/vacancies"
                     
@@ -122,13 +122,10 @@ class WorkZillaParserService:
                         html = await resp.text()
                     
                     soup = BeautifulSoup(html, "html.parser")
-                    
-                    # Селекторы для Work-Zilla
                     vacancies = soup.select(".vacancies-list_item__pOEbS")
-                    
                     log.info(f"Найдено вакансий: {len(vacancies)}")
                     
-                    new_vacancies = []
+                    all_vacancies = []
                     for v in vacancies:
                         try:
                             blocks = v.select("div.card_content__t4Uk0 > div")
@@ -137,7 +134,6 @@ class WorkZillaParserService:
                             price = blocks[1].get_text(strip=True) if len(blocks) > 1 else "—"
                             description = blocks[2].get_text(strip=True) if len(blocks) > 2 else "—"
                             
-                            # Получаем ссылку
                             link_tag = v.find("a")
                             url = BASE_URL + link_tag["href"] if link_tag and "href" in link_tag.attrs else ""
 
@@ -148,70 +144,78 @@ class WorkZillaParserService:
                                 "url": url,
                                 "date_create": str(time.time())
                             }
-                            
-                            norm_vacancy = normalize_vacancy(vacancy_data)
-                            if self._filter_vacancy(norm_vacancy, settings):
-                                self.db.save_workzilla_vacancy(norm_vacancy)
-                                new_vacancies.append(norm_vacancy)
-                                
+                            all_vacancies.append(normalize_vacancy(vacancy_data))
                         except Exception as e:
                             log.error(f"Ошибка обработки вакансии: {e}")
                             continue
+
+                    unique_new_vacancies = []
+                    for vacancy in all_vacancies:
+                        is_new = False
+                        for channel_config in channels:
+                            if self._filter_vacancy(vacancy, settings, channel_config):
+                                is_new = True
+                                break
+                        if is_new:
+                            unique_new_vacancies.append(vacancy)
+
+                    for vacancy in unique_new_vacancies:
+                        self.db.save_workzilla_vacancy(vacancy)
+
+                    for channel_config in channels:
+                        new_vacancies_for_channel = []
+                        for vacancy in unique_new_vacancies:
+                            if self._filter_vacancy(vacancy, settings, channel_config):
+                                new_vacancies_for_channel.append(vacancy)
+
+                        if new_vacancies_for_channel and channel_config["channel_id"]:
+                            for vacancy in new_vacancies_for_channel:
+                                message_text = render_vacancy(vacancy)
+                                try:
+                                    await self.bot.send_message(chat_id=channel_config["channel_id"], text=message_text)
+                                except TelegramRetryAfter as e:
+                                    log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
+                                    await asyncio.sleep(e.retry_after)
+                                    await self.bot.send_message(chat_id=channel_config["channel_id"], text=message_text)
+                                except Exception as e:
+                                    log.error(f"Не удалось отправить сообщение Work-Zilla: {e}")
+                                await asyncio.sleep(1)
                     
-                    if new_vacancies and target_channel:
-                        for vacancy in new_vacancies:
-                            message_text = render_vacancy(vacancy)
-                            try:
-                                await self.bot.send_message(chat_id=target_channel, text=message_text)
-                            except TelegramRetryAfter as e:
-                                log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
-                                await asyncio.sleep(e.retry_after)
-                                await self.bot.send_message(chat_id=target_channel, text=message_text)
-                            except Exception as e:
-                                log.error(f"Не удалось отправить сообщение Work-Zilla: {e}")
-                            await asyncio.sleep(1)
-                    
-                    new_vacancies_count = len(new_vacancies)
+                    new_vacancies_count = len(unique_new_vacancies)
                     log.info(f"Отфильтровано новых вакансий: {new_vacancies_count}")
 
                 except Exception as e:
                     log.error(f"Ошибка парсинга Work-Zilla: {e}", exc_info=True)
-            
-            log.info(f"Work-Zilla парсинг завершен. Найдено новых вакансий: {new_vacancies_count}")
 
-    def _filter_vacancy(self, vacancy: Dict[str, Any], settings: dict) -> bool:
-        keywords = settings.get("keywords", [])
+                log.info(f"Work-Zilla парсинг завершен. Найдено новых вакансий: {new_vacancies_count}")
+
+    def _filter_vacancy(self, vacancy: Dict[str, Any], settings: dict, channel_config: dict) -> bool:
+        keywords = channel_config.get("keywords", [])
+        minus_keywords = channel_config.get("minus_keywords", [])
         min_price = settings.get("min_price")
         max_price = settings.get("max_price")
 
-        # Извлекаем числовое значение цены для фильтрации
         price_text = vacancy.get("price", "")
         price_value = None
         
-        # Пытаемся извлечь число из строки с ценой
         if price_text != "Цена не указана" and price_text != "—":
             price_match = re.search(r'\d+', price_text.replace(' ', ''))
             if price_match:
                 price_value = int(price_match.group())
 
-        # Фильтрация по ключевым словам
         title_and_desc = (vacancy.get("title", "") + " " + vacancy.get("description", "")).lower()
-        if keywords:
-            if not any(kw.lower() in title_and_desc for kw in keywords):
-                return False
+        if keywords and not any(kw.lower() in title_and_desc for kw in keywords):
+            return False
+
+        if minus_keywords and any(kw.lower() in title_and_desc for kw in minus_keywords):
+            return False
         
-        # Фильтрация по цене
         if min_price is not None and price_value is not None and price_value < min_price:
             return False
         if max_price is not None and price_value is not None and price_value > max_price:
             return False
         
         return True
-
-    async def set_keywords(self, keywords: List[str]) -> None:
-        settings = self.db.get_workzilla_settings()
-        self.db.save_workzilla_settings(keywords, settings.get("min_price"), settings.get("max_price"))
-        log.info(f"Установлены ключевые слова Work-Zilla: {keywords}")
 
     async def set_price_range(self, min_price: int, max_price: int) -> None:
         settings = self.db.get_workzilla_settings()

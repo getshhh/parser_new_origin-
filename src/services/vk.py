@@ -99,7 +99,12 @@ class VKParserService:
     async def _parsing_loop(self) -> None:
         while self.is_running:
             try:
-                await self._parse_and_send()
+                channels = self.db.get_parser_channels("vk")
+                if not channels:
+                    log.info("Нет настроенных каналов для VK. Парсер не будет запущен.")
+                    return
+
+                await self._parse_and_send(channels)
                 # ⚡️ тянем интервал из БД
                 settings = self.db.get_parser_settings("vk")
                 interval = settings["message_interval"] if settings else config.PARSING_INTERVAL
@@ -111,14 +116,9 @@ class VKParserService:
                 log.error(f"Ошибка в цикле парсинга VK: {e}", exc_info=True)
                 await asyncio.sleep(60)
 
-    async def _parse_and_send(self) -> None:
+    async def _parse_and_send(self, channels: List[Dict]) -> None:
         async with self.lock:
             settings = self.db.get_vk_settings()
-            parser_cfg = self.db.get_parser_settings("vk")
-
-            # если канал в настройках — туда, иначе тот чат, где включили
-            target_channel = parser_cfg["channel_id"] if parser_cfg and parser_cfg.get("channel_id") else self.chat_id
-
             group_ids = settings.get("group_ids", [])
             
             if not group_ids:
@@ -143,28 +143,41 @@ class VKParserService:
                             data = await resp.json()
                             items = data.get("response", {}).get("items", [])
                         
-                        new_posts = []
-                        for item in items:
-                            if isinstance(item, dict):
-                                norm_post = normalize_post(item, group_id)
-                                if self._filter_post(norm_post, settings):
-                                    self.db.save_vk_post(norm_post)
-                                    new_posts.append(norm_post)
+                        all_posts = [normalize_post(item, group_id) for item in items if isinstance(item, dict)]
                         
-                        if new_posts and target_channel:
-                            for post in new_posts:
-                                message_text = render_post(post)
-                                try:
-                                    await self.bot.send_message(chat_id=target_channel, text=message_text)
-                                except TelegramRetryAfter as e:
-                                    log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
-                                    await asyncio.sleep(e.retry_after)
-                                    await self.bot.send_message(chat_id=target_channel, text=message_text)
-                                except Exception as e:
-                                    log.error(f"Не удалось отправить сообщение VK: {e}")
-                                await asyncio.sleep(1)
+                        unique_new_posts = []
+                        for post in all_posts:
+                            is_new = False
+                            for channel_config in channels:
+                                if self._filter_post(post, settings, channel_config):
+                                    is_new = True
+                                    break
+                            if is_new:
+                                unique_new_posts.append(post)
+
+                        for post in unique_new_posts:
+                            self.db.save_vk_post(post)
+
+                        for channel_config in channels:
+                            new_posts_for_channel = []
+                            for post in unique_new_posts:
+                                if self._filter_post(post, settings, channel_config):
+                                    new_posts_for_channel.append(post)
+
+                            if new_posts_for_channel and channel_config["channel_id"]:
+                                for post in new_posts_for_channel:
+                                    message_text = render_post(post)
+                                    try:
+                                        await self.bot.send_message(chat_id=channel_config["channel_id"], text=message_text)
+                                    except TelegramRetryAfter as e:
+                                        log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
+                                        await asyncio.sleep(e.retry_after)
+                                        await self.bot.send_message(chat_id=channel_config["channel_id"], text=message_text)
+                                    except Exception as e:
+                                        log.error(f"Не удалось отправить сообщение VK: {e}")
+                                    await asyncio.sleep(1)
                         
-                        new_posts_count += len(new_posts)
+                        new_posts_count += len(unique_new_posts)
                         await asyncio.sleep(DELAY_SEC)
 
                     except Exception as e:
@@ -173,39 +186,33 @@ class VKParserService:
             
             log.info(f"VK парсинг завершен. Найдено новых постов: {new_posts_count}")
 
-    def _filter_post(self, post: Dict[str, Any], settings: dict) -> bool:
-        keywords = settings.get("keywords", [])
+    def _filter_post(self, post: Dict[str, Any], settings: dict, channel_config: dict) -> bool:
+        keywords = channel_config.get("keywords", [])
+        minus_keywords = channel_config.get("minus_keywords", [])
         min_price = settings.get("min_price")
         max_price = settings.get("max_price")
 
-        # Извлекаем числовое значение цены для фильтрации
         price_text = post.get("price", "")
         price_value = None
         
-        # Пытаемся извлечь число из строки с ценой
         if price_text != "Цена не указана":
             price_match = re.search(r'\d+', price_text)
             if price_match:
                 price_value = int(price_match.group())
 
-        # Фильтрация по ключевым словам
         title_and_desc = (post.get("title", "") + " " + post.get("description", "")).lower()
-        if keywords:
-            if not any(kw.lower() in title_and_desc for kw in keywords):
-                return False
+        if keywords and not any(kw.lower() in title_and_desc for kw in keywords):
+            return False
+
+        if minus_keywords and any(kw.lower() in title_and_desc for kw in minus_keywords):
+            return False
         
-        # Фильтрация по цене
         if min_price is not None and price_value is not None and price_value < min_price:
             return False
         if max_price is not None and price_value is not None and price_value > max_price:
             return False
         
         return True
-
-    async def set_keywords(self, keywords: List[str]) -> None:
-        settings = self.db.get_vk_settings()
-        self.db.save_vk_settings(keywords, settings.get("min_price"), settings.get("max_price"))
-        log.info(f"Установлены ключевые слова VK: {keywords}")
 
     async def set_price_range(self, min_price: int, max_price: int) -> None:
         settings = self.db.get_vk_settings()

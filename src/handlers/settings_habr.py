@@ -1,67 +1,35 @@
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
 from database.database import Database
 
 from .states import Form
 from keyboards.settings_habr import settings_habr_kb
-from .services import habr_parser_service
 
 router = Router()
 db = Database()
 
-# -----------------------------
-# меню настроек Habr
-# -----------------------------
-@router.callback_query(F.data == "settings_habr")
-async def settings_habr(callback: CallbackQuery, state: FSMContext = None):
+async def settings_habr_menu(callback: CallbackQuery, state: FSMContext):
     settings = db.get_habr_settings()
-    parser_settings = db.get_parser_settings('habr')
+    min_salary = settings.get("min_salary", None)
+    max_salary = settings.get("max_salary", None)
+    cities = settings.get("cities", [])
 
-    channel_id = None
-    message_interval = None
-    if parser_settings:
-        channel_id = parser_settings.get("channel_id")
-        message_interval = parser_settings.get("message_interval")
+    salary_range_parts = []
+    if min_salary is not None:
+        salary_range_parts.append(f"от {min_salary}")
+    if max_salary is not None:
+        salary_range_parts.append(f"до {max_salary}")
+    salary_range = ' '.join(salary_range_parts) if salary_range_parts else 'не задан'
 
-    channel_name = "не задан"
-    if channel_id:
-        try:
-            chat = await callback.bot.get_chat(channel_id)
-            channel_name = f"@{chat.username}" if chat.username else chat.title
-        except Exception:
-            channel_name = f"ID: {channel_id} (нет доступа?)"
-
-    interval_text = f"{message_interval} сек." if message_interval is not None else "не задан"
-
-    text = f"""
-⚙️ Настройки Habr Career:
-🔍 Ключевые слова: {', '.join(settings['keywords']) if settings['keywords'] else 'Не заданы'}
-💰 Мин. зарплата: {settings['min_salary'] if settings['min_salary'] else 'Не задана'}
-💰 Макс. зарплата: {settings['max_salary'] if settings['max_salary'] else 'Не задана'}
-📍 Города: {', '.join(settings['cities']) if settings['cities'] else 'Все города'}
-📢 Канал для отправки: {channel_name}
-⏰ Интервал сообщений: {interval_text}
-    """.strip()
-
-    await callback.message.edit_text(text, reply_markup=settings_habr_kb())
+    settings_text = (
+        "⚙️ **Настройки Habr (специфичные)**\n\n"
+        f"**Зарплатный диапазон:** {salary_range}\n"
+        f"**Города:** {', '.join(cities) if cities else 'Все города'}\n\n"
+        "Выберите, что хотите изменить."
+    )
+    await callback.message.edit_text(settings_text, reply_markup=settings_habr_kb(), parse_mode="Markdown")
     await callback.answer()
-
-# -----------------------------
-# изменение ключевых слов
-# -----------------------------
-@router.callback_query(F.data == "set_habr_keywords")
-async def set_habr_keywords(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Введите ключевые слова через запятую:")
-    await state.set_state(Form.setting_habr_keywords)
-    await callback.answer()
-
-@router.message(Form.setting_habr_keywords)
-async def process_habr_keywords(message: Message, state: FSMContext):
-    keywords = [kw.strip() for kw in message.text.split(',') if kw.strip()]
-    await habr_parser_service.set_habr_keywords(keywords)
-    await message.answer(f"✅ Ключевые слова обновлены: {', '.join(keywords) if keywords else '—'}")
-    await state.clear()
 
 # -----------------------------
 # изменение зарплаты
@@ -87,7 +55,14 @@ async def process_habr_salary_max(message: Message, state: FSMContext):
     try:
         max_salary = int(message.text)
         data = await state.get_data()
-        await habr_parser_service.set_habr_salary_range(data.get('min_salary'), max_salary)
+        settings = db.get_habr_settings()
+        db.save_habr_settings(
+            keywords=settings.get("keywords", []),
+            min_salary=data.get('min_salary'),
+            max_salary=max_salary,
+            cities=settings.get("cities", []),
+            employment_types=settings.get("employment_types", [])
+        )
         await message.answer(f"✅ Зарплатный диапазон обновлён: {data.get('min_salary')} - {max_salary} руб.")
         await state.clear()
     except ValueError:
@@ -105,37 +80,17 @@ async def set_habr_cities(callback: CallbackQuery, state: FSMContext):
 @router.message(Form.setting_habr_cities)
 async def process_habr_cities(message: Message, state: FSMContext):
     cities = [c.strip() for c in message.text.split(',') if c.strip()]
-    await habr_parser_service.set_habr_cities(cities)
+    settings = db.get_habr_settings()
+    db.save_habr_settings(
+        keywords=settings.get("keywords", []),
+        min_salary=settings.get("min_salary"),
+        max_salary=settings.get("max_salary"),
+        cities=cities,
+        employment_types=settings.get("employment_types", [])
+    )
     await message.answer(f"✅ Города обновлены: {', '.join(cities) if cities else 'Все города'}")
     await state.clear()
 
-# -----------------------------
-# Выбор канала для Habr
-# -----------------------------
-@router.callback_query(F.data == "set_habr_channel")
-async def set_habr_channel(callback: CallbackQuery):
-    channels = db.list_channels()
-    if not channels:
-        await callback.answer("Бот не является администратором ни в одном канале. Добавьте бота в канал как администратора.", show_alert=True)
-        return
-
-    buttons = [
-        [InlineKeyboardButton(text=title, callback_data=f"habr_channel_select_{chat_id}")]
-        for chat_id, title in channels
-    ]
-    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="settings_habr")])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    await callback.message.edit_text("Выберите канал для отправки уведомлений Habr:", reply_markup=keyboard)
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("habr_channel_select_"))
-async def process_habr_channel_selection(callback: CallbackQuery, state: FSMContext):
-    channel_id = int(callback.data.split("_")[-1])
-    db.set_parser_channel('habr', channel_id)
-
-    await callback.answer("✅ Канал для Habr успешно выбран!")
-    await settings_habr(callback, state)
 
 # -----------------------------
 # Настройка интервала для Habr
