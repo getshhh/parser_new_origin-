@@ -3,12 +3,7 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
-from keyboards.parser_settings import (
-    get_parser_settings_kb,
-    get_channel_selection_kb,
-    get_interval_selection_kb,
-    get_back_to_parser_settings_kb,
-)
+from keyboards.parser_settings import get_parser_settings_kb, get_channel_selection_kb, get_interval_selection_kb, get_back_to_parser_settings_kb
 from database.database import Database
 from .states import Form
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
