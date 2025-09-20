@@ -92,7 +92,7 @@ class KworkParserService:
         self.is_running = True
         self.chat_id = chat_id
         log.info("Парсер Kwork запущен.")
-        self.task = asyncio.create_task(self._parsing_loop(chat_id))
+        self.task = asyncio.create_task(self._parsing_loop())
 
     async def stop_parser(self) -> None:
         if not self.is_running:
@@ -102,30 +102,28 @@ class KworkParserService:
             self.task.cancel()
         log.info("Парсер Kwork остановлен.")
 
-    async def _parsing_loop(self, chat_id: int) -> None:
-        channels = self.db.get_parser_channels("kwork")
-        if not channels:
-            log.info("Нет настроенных каналов для Kwork. Парсер не будет запущен.")
-            await self.bot.send_message(chat_id, "Нет настроенных каналов для Kwork. Парсер не будет запущен.")
-            self.is_running = False
-            return
-
+    async def _parsing_loop(self) -> None:
         while self.is_running:
             try:
-                await self._parse_and_send(channels)
+                await self._parse_and_send()
                 # ⚡️ тянем интервал из БД
                 settings = self.db.get_parser_settings("kwork")
                 interval = settings["message_interval"] if settings else config.PARSING_INTERVAL
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
-                log.info("Цикл парсинга Kwork отменен.")
+                log.info("Цикл парсинга отменен.")
                 break
             except Exception as e:
-                log.error(f"Ошибка в цикле парсинга Kwork: {e}", exc_info=True)
+                log.error(f"Ошибка в цикле парсинга: {e}", exc_info=True)
                 await asyncio.sleep(60)
 
-    async def _parse_and_send(self, channels: List[Dict]) -> None:
+    async def _parse_and_send(self) -> None:
         async with self.lock:
+            channels = self.db.get_parser_channels("kwork")
+            if not channels:
+                log.info("Нет настроенных каналов для Kwork.")
+                return
+
             connector = aiohttp.TCPConnector(limit=8, ssl=False)
             timeout = aiohttp.ClientTimeout(total=TIMEOUT_TOTAL)
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
@@ -151,27 +149,26 @@ class KworkParserService:
                             if not isinstance(items, list):
                                 items = []
 
-                        settings = self.db.get_settings("kwork")
+                        global_settings = self.db.get_settings("kwork")
 
-                        for channel_config in channels:
-                            target_channel = channel_config["channel_id"]
+                        for channel in channels:
                             new_items = []
                             for item in items:
                                 if isinstance(item, dict):
                                     norm_item = normalize_item(item)
-                                    if self._filter_item(norm_item, settings, channel_config):
+                                    if self._filter_item(norm_item, global_settings, channel):
                                         self.db.save_project(norm_item)
                                         new_items.append(norm_item)
 
-                            if new_items and target_channel:
+                            if new_items:
                                 for item in new_items:
                                     message_text = render(item)
                                     try:
-                                        await self.bot.send_message(chat_id=target_channel, text=message_text)
+                                        await self.bot.send_message(chat_id=channel["channel_id"], text=message_text)
                                     except TelegramRetryAfter as e:
                                         log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
                                         await asyncio.sleep(e.retry_after)
-                                        await self.bot.send_message(chat_id=target_channel, text=message_text)
+                                        await self.bot.send_message(chat_id=channel["channel_id"], text=message_text)
                                     except Exception as e:
                                         log.error(f"Не удалось отправить сообщение: {e}")
                                     await asyncio.sleep(1)
@@ -183,22 +180,20 @@ class KworkParserService:
                         await asyncio.sleep(DELAY_SEC)
 
                     except Exception as e:
-                        log.error(f"Ошибка парсинга Kwork: {e}")
+                        log.error(f"Ошибка парсинга: {e}")
                         break
-            log.info(f"Парсинг Kwork завершен. Найдено новых проектов: {new_items_count}")
+            log.info(f"Завершено. Найдено новых проектов: {new_items_count}")
 
-    def _filter_item(self, item: Dict[str, Any], settings: dict, channel_config: dict) -> bool:
-        keywords = channel_config.get("keywords", [])
-        minus_keywords = channel_config.get("minus_keywords", [])
-        min_price = settings.get("min_price")
-        max_price = settings.get("max_price")
+    def _filter_item(self, item: Dict[str, Any], global_settings: dict, channel_settings: dict) -> bool:
+        # Сначала применяем глобальные фильтры
+        global_keywords = global_settings.get("keywords", [])
+        min_price = global_settings.get("min_price")
+        max_price = global_settings.get("max_price")
 
         title_and_desc = (item.get("title", "") + " " + item.get("description", "")).lower()
-        if keywords and not any(kw.lower() in title_and_desc for kw in keywords):
-            return False
-
-        if minus_keywords and any(kw.lower() in title_and_desc for kw in minus_keywords):
-            return False
+        if global_keywords:
+            if not any(kw.lower() in title_and_desc for kw in global_keywords):
+                return False
 
         price = item.get("price")
         if min_price is not None and price is not None and price < min_price:
@@ -206,9 +201,16 @@ class KworkParserService:
         if max_price is not None and price is not None and price > max_price:
             return False
 
-        return True
+        # Затем применяем фильтры для конкретного канала
+        channel_keywords = channel_settings.get("keywords", [])
+        channel_minus_keywords = channel_settings.get("minus_keywords", [])
 
-    async def set_price_range(self, min_price: int, max_price: int) -> None:
-        settings = self.db.get_settings("kwork")
-        self.db.save_settings(settings["keywords"], min_price, max_price, "kwork")
-        log.info(f"Установлен ценовой диапазон для Kwork: {min_price}-{max_price}")
+        if channel_keywords:
+            if not any(kw.lower() in title_and_desc for kw in channel_keywords):
+                return False
+
+        if channel_minus_keywords:
+            if any(kw.lower() in title_and_desc for kw in channel_minus_keywords):
+                return False
+
+        return True

@@ -47,17 +47,9 @@ class YouDoParserService:
         log.info("YouDo parser stopped")
 
     async def _run_loop(self, chat_id: Optional[int]) -> None:
-        channels = self.db.get_parser_channels("youdo")
-        if not channels:
-            log.info("Нет настроенных каналов для YouDo. Парсер не будет запущен.")
-            if self.bot and chat_id:
-                await self.bot.send_message(chat_id, "Нет настроенных каналов для YouDo. Парсер не будет запущен.")
-            self.is_running = False
-            return
-
         while self.is_running:
             try:
-                await self._parse_and_store(channels)
+                await self._parse_and_store(chat_id)
                 # ⚡️ тянем интервал из БД
                 settings = self.db.get_parser_settings("youdo")
                 interval = settings["message_interval"] if settings else config.PARSING_INTERVAL
@@ -68,11 +60,14 @@ class YouDoParserService:
                 log.error(f"YouDo parser error: {e}", exc_info=True)
                 await asyncio.sleep(60) # Fallback sleep
 
-    async def _parse_and_store(self, channels: List[Dict]) -> None:
+    async def _parse_and_store(self, chat_id: Optional[int]) -> None:
         async with self.lock:
-            settings = self.db.get_youdo_settings()
-            min_price = settings.get("min_price")
-            max_price = settings.get("max_price")
+            channels = self.db.get_parser_channels("youdo")
+            if not channels:
+                log.info("Нет настроенных каналов для YouDo.")
+                return
+
+            global_settings = self.db.get_youdo_settings()
 
             json_data = {
                 "q": "",
@@ -91,32 +86,9 @@ class YouDoParserService:
                     data = await resp.json()
                     items = data.get("ResultObject", {}).get("Items", [])
 
-                    unique_new_tasks = []
-                    for item in items:
-                        is_new = False
-                        for channel_config in channels:
-                            title = item.get("Name", "")
-                            desc = item.get("Description", "")
-                            title_l, desc_l = title.lower(), desc.lower()
-                            text_for_filter = title_l + " " + desc_l
-                            keywords = set(kw.lower() for kw in (channel_config.get("keywords") or []))
-                            minus_keywords = set(kw.lower() for kw in (channel_config.get("minus_keywords") or []))
-
-                            if keywords and not any(kw in text_for_filter for kw in keywords):
-                                continue
-                            if minus_keywords and any(kw in text_for_filter for kw in minus_keywords):
-                                continue
-
-                            budget = item.get("Budget")
-                            if min_price is not None and (budget is None or budget < min_price):
-                                continue
-                            if max_price is not None and (budget is not None and budget > max_price):
-                                continue
-
-                            is_new = True
-                            break
-
-                        if is_new:
+                    for channel in channels:
+                        new_tasks = []
+                        for item in items:
                             task = {
                                 "id": item.get("Id"),
                                 "title": item.get("Name", ""),
@@ -126,41 +98,17 @@ class YouDoParserService:
                                 "date": item.get("DateTimeString"),
                                 "url": f"https://youdo.com{item.get('Url')}",
                                 "date_create": datetime.utcnow().isoformat(timespec="seconds"),
+                                "price": item.get("Budget")
                             }
-                            unique_new_tasks.append(task)
+                            if self._filter_item(task, global_settings, channel):
+                                self.db.save_youdo_task(task)
+                                new_tasks.append(task)
 
-                    for task in unique_new_tasks:
-                        self.db.save_youdo_task(task)
-
-                    for channel_config in channels:
-                        target_channel = channel_config["channel_id"]
-                        new_tasks_for_channel = []
-                        for task in unique_new_tasks:
-                            title = task.get("title", "")
-                            desc = task.get("description", "")
-                            title_l, desc_l = title.lower(), desc.lower()
-                            text_for_filter = title_l + " " + desc_l
-                            keywords = set(kw.lower() for kw in (channel_config.get("keywords") or []))
-                            minus_keywords = set(kw.lower() for kw in (channel_config.get("minus_keywords") or []))
-
-                            if keywords and not any(kw in text_for_filter for kw in keywords):
-                                continue
-                            if minus_keywords and any(kw in text_for_filter for kw in minus_keywords):
-                                continue
-
-                            budget = item.get("Budget")
-                            if min_price is not None and (budget is None or budget < min_price):
-                                continue
-                            if max_price is not None and (budget is not None and budget > max_price):
-                                continue
-
-                            new_tasks_for_channel.append(task)
-
-                        if self.bot and target_channel and new_tasks_for_channel:
-                            for task in new_tasks_for_channel:
+                        if self.bot and new_tasks:
+                            for task in new_tasks:
                                 try:
                                     await self.bot.send_message(
-                                        target_channel, render(task),
+                                        channel["channel_id"], render(task),
                                         parse_mode="HTML",
                                         disable_web_page_preview=True
                                     )
@@ -168,7 +116,7 @@ class YouDoParserService:
                                     log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
                                     await asyncio.sleep(e.retry_after)
                                     await self.bot.send_message(
-                                        target_channel, render(task),
+                                        channel["channel_id"], render(task),
                                         parse_mode="HTML",
                                         disable_web_page_preview=True
                                     )
@@ -176,9 +124,33 @@ class YouDoParserService:
                                     log.error(f"Failed to send message: {e}")
                                 await asyncio.sleep(1)
 
-    async def set_price_range(self, min_price: int, max_price: int) -> None:
-        settings = self.db.get_youdo_settings()
-        self.db.save_youdo_settings(
-            settings.get("keywords", []), min_price, max_price
-        )
-        log.info(f"YouDo price range set: {min_price}-{max_price}")
+    def _filter_item(self, item: Dict[str, Any], global_settings: dict, channel_settings: dict) -> bool:
+        # Сначала применяем глобальные фильтры
+        global_keywords = global_settings.get("keywords", [])
+        min_price = global_settings.get("min_price")
+        max_price = global_settings.get("max_price")
+
+        title_and_desc = (item.get("title", "") + " " + item.get("description", "")).lower()
+        if global_keywords:
+            if not any(kw.lower() in title_and_desc for kw in global_keywords):
+                return False
+
+        price = item.get("price")
+        if min_price is not None and (price is None or price < min_price):
+            return False
+        if max_price is not None and (price is not None and price > max_price):
+            return False
+
+        # Затем применяем фильтры для конкретного канала
+        channel_keywords = channel_settings.get("keywords", [])
+        channel_minus_keywords = channel_settings.get("minus_keywords", [])
+
+        if channel_keywords:
+            if not any(kw.lower() in title_and_desc for kw in channel_keywords):
+                return False
+
+        if channel_minus_keywords:
+            if any(kw.lower() in title_and_desc for kw in channel_minus_keywords):
+                return False
+
+        return True

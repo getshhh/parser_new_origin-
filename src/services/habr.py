@@ -30,67 +30,49 @@ class HabrParserService:
         
         self.session = aiohttp.ClientSession()
         
-        channels = self.db.get_parser_channels("habr")
-        if not channels:
-            log.info("Нет настроенных каналов для Habr. Парсер не будет запущен.")
-            if self.bot and chat_id:
-                await self.bot.send_message(chat_id, "Нет настроенных каналов для Habr. Парсер не будет запущен.")
-            self.is_running = False
-            return
-
         while self.is_running:
             try:
-                all_vacancies = await self.extract_habr_vacancies()
+                channels = self.db.get_parser_channels("habr")
+                if not channels:
+                    log.info("Нет настроенных каналов для Habr.")
+                    await asyncio.sleep(60)
+                    continue
 
-                unique_new_vacancies = []
-                for vacancy in all_vacancies:
-                    is_new = False
-                    for channel_config in channels:
-                        if self._filter_vacancy(vacancy, channel_config):
-                            is_new = True
-                            break
-                    if is_new:
-                        unique_new_vacancies.append(vacancy)
+                vacancies = await self.extract_habr_vacancies()
+                global_settings = self.db.get_habr_settings()
                 
-                for vacancy in unique_new_vacancies:
-                    self.db.save_habr_vacancy(vacancy)
+                for channel in channels:
+                    new_vacancies = 0
+                    if self.bot and vacancies:
+                        for vacancy in vacancies:
+                            if self._filter_vacancy(vacancy, global_settings, channel):
+                                self.db.save_habr_vacancy(vacancy)
+                                new_vacancies += 1
+                                message = self.render_vacancy(vacancy)
+                                try:
+                                    await self.bot.send_message(channel["channel_id"], message)
+                                except TelegramRetryAfter as e:
+                                    log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
+                                    await asyncio.sleep(e.retry_after)
+                                    await self.bot.send_message(channel["channel_id"], message)
+                                except Exception as e:
+                                    log.error(f"Failed to send message: {e}")
+                                await asyncio.sleep(1)
 
-                total_new_vacancies = len(unique_new_vacancies)
-                for channel_config in channels:
-                    target_channel = channel_config["channel_id"]
-
-                    new_vacancies_for_channel = []
-                    for vacancy in unique_new_vacancies:
-                        if self._filter_vacancy(vacancy, channel_config):
-                            new_vacancies_for_channel.append(vacancy)
-
-                    if self.bot and target_channel and new_vacancies_for_channel:
-                        for vacancy in new_vacancies_for_channel:
-                            message = self.render_vacancy(vacancy)
-                            try:
-                                await self.bot.send_message(target_channel, message)
-                            except TelegramRetryAfter as e:
-                                log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
-                                await asyncio.sleep(e.retry_after)
-                                await self.bot.send_message(target_channel, message)
-                            except Exception as e:
-                                log.error(f"Failed to send message: {e}")
-                            await asyncio.sleep(1)
-
-                if total_new_vacancies > 0 and self.bot and chat_id: # уведомление в админский чат
-                    try:
-                        await self.bot.send_message(chat_id, f"✅ Найдено {total_new_vacancies} новых вакансий на Habr и отправлено по каналам.")
-                    except TelegramRetryAfter as e:
-                        log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
-                        await asyncio.sleep(e.retry_after)
-                        await self.bot.send_message(chat_id, f"✅ Найдено {total_new_vacancies} новых вакансий на Habr и отправлено по каналам.")
+                    if new_vacancies > 0 and self.bot:
+                        try:
+                            await self.bot.send_message(channel["channel_id"], f"✅ Найдено {new_vacancies} новых вакансий на Habr")
+                        except TelegramRetryAfter as e:
+                            log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
+                            await asyncio.sleep(e.retry_after)
+                            await self.bot.send_message(channel["channel_id"], f"✅ Найдено {new_vacancies} новых вакансий на Habr")
                 
                 settings = self.db.get_parser_settings("habr")
                 interval = settings["message_interval"] if settings else 300
                 await asyncio.sleep(interval)
                 
             except Exception as e:
-                log.error(f"Ошибка в парсере Habr: {e}", exc_info=True)
+                log.error(f"Ошибка в парсере Habr: {e}")
                 if self.bot and chat_id:
                     await self.bot.send_message(chat_id, f"❌ Ошибка в парсере Habr: {e}")
                 await asyncio.sleep(60)
@@ -100,15 +82,56 @@ class HabrParserService:
         if self.session:
             await self.session.close()
     
+    def _filter_vacancy(self, vacancy, global_settings, channel_settings):
+        # Глобальные фильтры
+        global_keywords = global_settings.get("keywords", [])
+        min_salary = global_settings.get("min_salary")
+        max_salary = global_settings.get("max_salary")
+        cities = global_settings.get("cities", [])
+
+        title = vacancy.get("title", "").lower()
+        if global_keywords and not any(kw.lower() in title for kw in global_keywords):
+            return False
+
+        city = vacancy.get("city")
+        if cities and city not in cities and city != "Не указан":
+            return False
+
+        salary = vacancy.get("salary")
+        if salary != "Не указана" and min_salary is not None:
+            try:
+                salary_num = int(''.join(filter(str.isdigit, salary.split()[0])))
+                if salary_num < min_salary:
+                    return False
+                if max_salary is not None and salary_num > max_salary:
+                    return False
+            except:
+                pass
+
+        # Фильтры для канала
+        channel_keywords = channel_settings.get("keywords", [])
+        channel_minus_keywords = channel_settings.get("minus_keywords", [])
+
+        if channel_keywords and not any(kw.lower() in title for kw in channel_keywords):
+            return False
+
+        if channel_minus_keywords and any(kw.lower() in title for kw in channel_minus_keywords):
+            return False
+
+        return True
+
     async def extract_habr_vacancies(self):
         try:
             settings = self.db.get_habr_settings()
-            min_salary = settings.get("min_salary")
-            max_salary = settings.get("max_salary")
-            cities = settings.get("cities")
+            keywords = settings["keywords"]
             
             base_url = "https://career.habr.com/vacancies"
-            params = {"type": "all"}
+            params = {
+                "q": " ".join(keywords) if keywords else None,
+                "type": "all"
+            }
+
+            params = {k: v for k, v in params.items() if v is not None}
             
             async with self.session.get(base_url, params=params) as response:
                 response.raise_for_status()
@@ -128,7 +151,9 @@ class HabrParserService:
                     company_element = card.find('div', class_='vacancy-card__company')
                     company = company_element.get_text(strip=True) if company_element else "Unknown company"
                     
-                    salary_element = card.find('div', class_='basic-salary') or card.find('div', class_='vacancy-card__salary')
+                    salary_element = card.find('div', class_='basic-salary')
+                    if not salary_element:
+                        salary_element = card.find('div', class_='vacancy-card__salary')
                     salary = salary_element.get_text(strip=True) if salary_element else "Не указана"
                     
                     city = "Не указан"
@@ -137,8 +162,10 @@ class HabrParserService:
                         meta_items = meta_element.find_all(['a', 'div'])
                         for item in meta_items:
                             text = item.get_text(strip=True)
-                            if (len(text) > 2 and not any(char.isdigit() for char in text) and
-                                text != company and text not in ['Удалённо', 'Офис', 'Гибрид']):
+                            if (len(text) > 2 and
+                                not any(char.isdigit() for char in text) and
+                                text != company and
+                                text not in ['Удалённо', 'Офис', 'Гибрид']):
                                 city = text
                                 break
                     
@@ -151,22 +178,13 @@ class HabrParserService:
                             if tag_text != city:
                                 tags.append(tag_text)
                     
-                    if cities and city not in cities and city != "Не указан":
-                        continue
-                    
-                    if salary != "Не указана" and min_salary is not None:
-                        try:
-                            salary_num = int(''.join(filter(str.isdigit, salary.split()[0])))
-                            if salary_num < min_salary:
-                                continue
-                            if max_salary is not None and salary_num > max_salary:
-                                continue
-                        except:
-                            pass
-                    
                     vacancies.append({
-                        'title': title, 'link': link, 'company': company,
-                        'salary': salary, 'city': city, 'tags': tags,
+                        'title': title,
+                        'link': link,
+                        'company': company,
+                        'salary': salary,
+                        'city': city,
+                        'tags': tags,
                     })
                     
                 except Exception as e:
@@ -176,22 +194,8 @@ class HabrParserService:
             return vacancies
             
         except Exception as e:
-            log.error(f"Ошибка при извлечении вакансий: {e}", exc_info=True)
+            log.error(f"Ошибка при извлечении вакансий: {e}")
             return []
-
-    def _filter_vacancy(self, vacancy, channel_config):
-        keywords = channel_config.get("keywords", [])
-        minus_keywords = channel_config.get("minus_keywords", [])
-
-        text_for_filter = (vacancy['title'] + ' ' + ' '.join(vacancy['tags'])).lower()
-
-        if keywords and not any(kw.lower() in text_for_filter for kw in keywords):
-            return False
-
-        if minus_keywords and any(kw.lower() in text_for_filter for kw in minus_keywords):
-            return False
-
-        return True
 
     def render_vacancy(self, vacancy):
         tags_text = ', '.join(vacancy['tags']) if vacancy['tags'] else 'Нет тегов'
@@ -203,23 +207,3 @@ class HabrParserService:
 🔖 Теги: {tags_text}
 🔗 Ссылка: {vacancy['link']}
         """.strip()
-    
-    async def set_habr_salary_range(self, min_salary, max_salary):
-        settings = self.db.get_habr_settings()
-        self.db.save_habr_settings(
-            keywords=settings["keywords"],
-            min_salary=min_salary,
-            max_salary=max_salary,
-            cities=settings["cities"],
-            employment_types=settings["employment_types"]
-        )
-    
-    async def set_habr_cities(self, cities):
-        settings = self.db.get_habr_settings()
-        self.db.save_habr_settings(
-            keywords=settings["keywords"],
-            min_salary=settings["min_salary"],
-            max_salary=settings["max_salary"],
-            cities=cities,
-            employment_types=settings["employment_types"]
-        )

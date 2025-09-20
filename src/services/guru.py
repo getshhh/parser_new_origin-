@@ -77,17 +77,9 @@ class GuruParserService:
         log.info("Guru parser stopped")
 
     async def _run_loop(self, chat_id: Optional[int]) -> None:
-        channels = self.db.get_parser_channels("guru")
-        if not channels:
-            log.info("Нет настроенных каналов для Guru. Парсер не будет запущен.")
-            if self.bot and chat_id:
-                await self.bot.send_message(chat_id, "Нет настроенных каналов для Guru. Парсер не будет запущен.")
-            self.is_running = False
-            return
-
         while self.is_running:
             try:
-                await self._parse_and_store(channels)
+                await self._parse_and_store(chat_id)
                 # ⚡️ тянем интервал из БД
                 settings = self.db.get_parser_settings("guru")
                 interval = settings["message_interval"] if settings else config.PARSING_INTERVAL
@@ -98,52 +90,36 @@ class GuruParserService:
                 log.error(f"Guru parser error: {e}", exc_info=True)
                 await asyncio.sleep(60) # Fallback sleep
 
-    async def _parse_and_store(self, channels: List[Dict]) -> int:
+    async def _parse_and_store(self, chat_id: Optional[int]) -> int:
         async with self.lock:
+            channels = self.db.get_parser_channels("guru")
+            if not channels:
+                log.info("Нет настроенных каналов для Guru.")
+                return 0
+
             connector = aiohttp.TCPConnector(limit=8, ssl=False)
             timeout = aiohttp.ClientTimeout(total=40)
             async with aiohttp.ClientSession(connector=connector, timeout=timeout, headers=HEADERS) as session:
                 page = 1
-                settings = self.db.get_guru_settings()
-                min_price = settings.get("min_price")
-                max_price = settings.get("max_price")
+                global_settings = self.db.get_guru_settings()
 
                 while page <= PAGE_CAP:
                     items = await self._fetch_page(session, page)
                     if not items:
                         break
 
-                    for channel_config in channels:
-                        target_channel = channel_config["channel_id"]
-                        keywords = set(kw.lower() for kw in (channel_config.get("keywords") or []))
-                        minus_keywords = set(kw.lower() for kw in (channel_config.get("minus_keywords") or []))
-
+                    for channel in channels:
                         new_items = []
                         for it in items:
-                            title_l = (it.get("title") or "").lower()
-                            desc_l = (it.get("description") or "").lower()
-                            text_for_filter = title_l + " " + desc_l
+                            if self._filter_item(it, global_settings, channel):
+                                self.db.save_guru_project(it)
+                                new_items.append(it)
 
-                            if keywords and not any(kw in text_for_filter for kw in keywords):
-                                continue
-
-                            if minus_keywords and any(kw in text_for_filter for kw in minus_keywords):
-                                continue
-
-                            price = it.get("price")
-                            if min_price is not None and (price is None or price < min_price):
-                                continue
-                            if max_price is not None and (price is not None and price > max_price):
-                                continue
-
-                            self.db.save_guru_project(it)
-                            new_items.append(it)
-
-                        if self.bot and target_channel and new_items:
+                        if self.bot and new_items:
                             for item in new_items:
                                 try:
                                     await self.bot.send_message(
-                                        target_channel,
+                                        channel["channel_id"],
                                         render(item),
                                         parse_mode="HTML",
                                         disable_web_page_preview=True,
@@ -152,7 +128,7 @@ class GuruParserService:
                                     log.warning(f"Flood control exceeded. Retrying in {e.retry_after} seconds.")
                                     await asyncio.sleep(e.retry_after)
                                     await self.bot.send_message(
-                                        target_channel,
+                                        channel["channel_id"],
                                         render(item),
                                         parse_mode="HTML",
                                         disable_web_page_preview=True,
@@ -163,6 +139,37 @@ class GuruParserService:
                     page += 1
                     await asyncio.sleep(1)
                 return 0
+
+    def _filter_item(self, item: Dict[str, Any], global_settings: dict, channel_settings: dict) -> bool:
+        # Сначала применяем глобальные фильтры
+        global_keywords = global_settings.get("keywords", [])
+        min_price = global_settings.get("min_price")
+        max_price = global_settings.get("max_price")
+
+        title_and_desc = (item.get("title", "") + " " + item.get("description", "")).lower()
+        if global_keywords:
+            if not any(kw.lower() in title_and_desc for kw in global_keywords):
+                return False
+
+        price = item.get("price")
+        if min_price is not None and (price is None or price < min_price):
+            return False
+        if max_price is not None and (price is not None and price > max_price):
+            return False
+
+        # Затем применяем фильтры для конкретного канала
+        channel_keywords = channel_settings.get("keywords", [])
+        channel_minus_keywords = channel_settings.get("minus_keywords", [])
+
+        if channel_keywords:
+            if not any(kw.lower() in title_and_desc for kw in channel_keywords):
+                return False
+
+        if channel_minus_keywords:
+            if any(kw.lower() in title_and_desc for kw in channel_minus_keywords):
+                return False
+
+        return True
 
     async def _fetch_page(self, session: aiohttp.ClientSession, page: int) -> List[Dict[str, Any]]:
         url = LIST_URL if page == 1 else f"{LIST_URL}?page={page}"

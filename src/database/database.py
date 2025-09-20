@@ -215,27 +215,21 @@ class Database:
             return {"message_interval": row[0]}
         return None
 
-    def get_parser_channels(self, parser_name: str) -> List[Dict]:
-        """Получить все каналы для парсера"""
-        rows = self.cursor.execute(
-            "SELECT channel_id, keywords, minus_keywords FROM parser_channels WHERE parser_name = ?",
-            (parser_name,)
-        ).fetchall()
-        channels = []
-        for row in rows:
-            channels.append({
-                "channel_id": row[0],
-                "keywords": json.loads(row[1]) if row[1] else [],
-                "minus_keywords": json.loads(row[2]) if row[2] else []
-            })
-        return channels
+    def set_parser_interval(self, parser_name: str, interval: int):
+        """Установить интервал для парсера"""
+        self.cursor.execute(
+            "INSERT INTO parser_settings(parser_name, message_interval) VALUES (?, ?) "
+            "ON CONFLICT(parser_name) DO UPDATE SET message_interval=excluded.message_interval",
+            (parser_name, interval)
+        )
+        self.conn.commit()
 
-    def add_parser_channel(self, parser_name: str, channel_id: int, keywords: List[str] = None, minus_keywords: List[str] = None):
-        """Добавить канал для парсера"""
+    def add_parser_channel(self, parser_name: str, channel_id: int, keywords: List[str], minus_keywords: List[str]):
+        """Добавить или обновить канал для парсера"""
         self.cursor.execute(
             "INSERT INTO parser_channels(parser_name, channel_id, keywords, minus_keywords) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(parser_name, channel_id) DO UPDATE SET keywords=excluded.keywords, minus_keywords=excluded.minus_keywords",
-            (parser_name, channel_id, json.dumps(keywords or []), json.dumps(minus_keywords or []))
+            (parser_name, channel_id, json.dumps(keywords), json.dumps(minus_keywords))
         )
         self.conn.commit()
 
@@ -247,22 +241,20 @@ class Database:
         )
         self.conn.commit()
 
-    def set_parser_interval(self, parser_name: str, interval: int):
-        """Установить интервал для парсера"""
-        self.cursor.execute(
-            "INSERT INTO parser_settings(parser_name, message_interval) VALUES (?, ?) "
-            "ON CONFLICT(parser_name) DO UPDATE SET message_interval=excluded.message_interval",
-            (parser_name, interval)
-        )
-        self.conn.commit()
-
-    def delete_parser_settings(self, parser_name: str):
-        """Удалить настройки для парсера"""
-        self.cursor.execute(
-            "DELETE FROM parser_settings WHERE parser_name = ?",
+    def get_parser_channels(self, parser_name: str) -> List[Dict]:
+        """Получить все каналы для парсера"""
+        rows = self.cursor.execute(
+            "SELECT channel_id, keywords, minus_keywords FROM parser_channels WHERE parser_name = ?",
             (parser_name,)
-        )
-        self.conn.commit()
+        ).fetchall()
+        channels = []
+        for row in rows:
+            channels.append({
+                "channel_id": row[0],
+                "keywords": json.loads(row[1]),
+                "minus_keywords": json.loads(row[2])
+            })
+        return channels
 
     def upsert_channel(self, chat_id: int, title: str):
         self.cursor.execute(

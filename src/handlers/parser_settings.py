@@ -11,18 +11,21 @@ from keyboards.parser_settings import (
 )
 from database.database import Database
 from .states import Form
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 router = Router()
 db = Database()
 
 
-async def _show_parser_settings(callback: CallbackQuery, state: FSMContext, parser_name: str):
+@router.callback_query(F.data.startswith("settings_"))
+async def parser_settings(callback: CallbackQuery, state: FSMContext):
+    parser_name = callback.data.split("_")[1]
     await state.update_data(parser_name=parser_name)
 
     channels = db.get_parser_channels(parser_name)
-    text = f"⚙️ Настройки каналов парсера: {parser_name.upper()}\n\n"
+    text = f"⚙️ Настройки парсера: {parser_name.upper()}\n\n"
     if not channels:
-        text += "Каналы для отправки не настроены."
+        text += "Каналы для отправки не настроены.\n\n"
     else:
         text += "Каналы для отправки:\n"
         for channel in channels:
@@ -38,15 +41,35 @@ async def _show_parser_settings(callback: CallbackQuery, state: FSMContext, pars
             text += f"  - {channel_name}:\n"
             text += f"    Ключевые слова: {keywords}\n"
             text += f"    Минус-слова: {minus_keywords}\n"
+        text += "\n"
+
+    if parser_name in ["kwork", "fl", "guru", "youdo"]:
+        settings = db.get_settings(parser_name)
+        min_price = settings.get("min_price", None)
+        max_price = settings.get("max_price", None)
+        price_range_parts = []
+        if min_price is not None:
+            price_range_parts.append(f"от {min_price}")
+        if max_price is not None:
+            price_range_parts.append(f"до {max_price}")
+        price_range = ' '.join(price_range_parts) if price_range_parts else 'не задан'
+        text += f"**Ценовой диапазон:** {price_range}\n"
+
+        global_keywords = ", ".join(settings.get("keywords", [])) if settings.get("keywords") else "не заданы"
+        text += f"**Глобальные ключевые слова:** {global_keywords}\n"
+
+    if parser_name == "vk":
+        settings = db.get_vk_settings()
+        group_ids = ", ".join(settings.get("group_ids", [])) if settings.get("group_ids") else "не заданы"
+        text += f"**ID групп:** {group_ids}\n"
+
+    if parser_name == "habr":
+        settings = db.get_habr_settings()
+        cities = ", ".join(settings.get("cities", [])) if settings.get("cities") else "не заданы"
+        text += f"**Города:** {cities}\n"
 
     await callback.message.edit_text(text, reply_markup=get_parser_settings_kb(parser_name))
     await callback.answer()
-
-
-@router.callback_query(F.data.startswith("channel_settings_"))
-async def parser_settings(callback: CallbackQuery, state: FSMContext):
-    parser_name = callback.data.split("_")[2]
-    await _show_parser_settings(callback, state, parser_name)
 
 
 @router.callback_query(F.data.startswith("add_channel_"))
@@ -155,8 +178,7 @@ async def remove_channel(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("select_channel_remove_"))
 async def select_channel_to_remove(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split("_")
-    data = await state.get_data()
-    parser_name = data["parser_name"]
+    parser_name = parts[3]
     channel_id = int(parts[4])
     
     db.delete_parser_channel(parser_name, channel_id)
@@ -266,8 +288,7 @@ async def set_parser_interval(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("set_") & F.data.endswith("_interval_"))
 async def select_parser_interval(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split('_')
-    data = await state.get_data()
-    parser_name = data["parser_name"]
+    parser_name = parts[1]
     interval = int(parts[3])
     
     db.set_parser_interval(parser_name, interval)
@@ -278,19 +299,117 @@ async def select_parser_interval(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-@router.message(Command(commands=["cancel"]))
-@router.message(F.text.casefold() == "cancel")
-async def cancel_handler(message: Message, state: FSMContext) -> None:
-    """
-    Allow user to cancel any action
-    """
-    current_state = await state.get_state()
-    if current_state is None:
-        return
+@router.callback_query(F.data.startswith("set_") & F.data.endswith("_price"))
+async def set_parser_price(callback: CallbackQuery, state: FSMContext):
+    parser_name = callback.data.replace("set_", "").replace("_price", "")
+    await state.update_data(parser_name=parser_name)
 
-    logging.info("Cancelling state %r", current_state)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"settings_{parser_name}")]
+    ])
+    await callback.message.edit_text("Введите минимальную цену:", reply_markup=keyboard)
+    await state.set_state(Form.setting_price_min)
+    await callback.answer()
+
+@router.message(Form.setting_price_min)
+async def process_price_min(message: Message, state: FSMContext):
+    try:
+        min_price = int(message.text)
+        data = await state.get_data()
+        parser_name = data["parser_name"]
+        await state.update_data(min_price=min_price)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=f"settings_{parser_name}")]
+        ])
+        await message.answer("Теперь введите максимальную цену:", reply_markup=keyboard)
+        await state.set_state(Form.setting_price_max)
+    except ValueError:
+        data = await state.get_data()
+        parser_name = data["parser_name"]
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=f"settings_{parser_name}")]
+        ])
+        await message.answer("❌ Введите число!", reply_markup=keyboard)
+
+@router.message(Form.setting_price_max)
+async def process_price_max(message: Message, state: FSMContext):
+    try:
+        max_price = int(message.text)
+        data = await state.get_data()
+        parser_name = data["parser_name"]
+        min_price = data.get("min_price")
+
+        settings = db.get_settings(parser_name)
+        db.save_settings(settings.get('keywords', []), min_price, max_price, parser_name)
+
+        await message.answer(f"✅ Ценовой диапазон обновлён: {min_price} - {max_price}")
+        await state.clear()
+    except ValueError:
+        data = await state.get_data()
+        parser_name = data["parser_name"]
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=f"settings_{parser_name}")]
+        ])
+        await message.answer("❌ Введите число!", reply_markup=keyboard)
+
+@router.callback_query(F.data.startswith("set_") & F.data.endswith("_keywords"))
+async def set_parser_keywords(callback: CallbackQuery, state: FSMContext):
+    parser_name = callback.data.replace("set_", "").replace("_keywords", "")
+    await state.update_data(parser_name=parser_name)
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"settings_{parser_name}")]
+    ])
+    await callback.message.edit_text("Введите ключевые слова через запятую:", reply_markup=keyboard)
+    await state.set_state(Form.setting_global_keywords)
+    await callback.answer()
+
+@router.message(Form.setting_global_keywords)
+async def process_global_keywords(message: Message, state: FSMContext):
+    keywords = [kw.strip() for kw in message.text.split(',') if kw.strip()]
+    data = await state.get_data()
+    parser_name = data["parser_name"]
+
+    settings = db.get_settings(parser_name)
+    db.save_settings(keywords, settings.get('min_price'), settings.get('max_price'), parser_name)
+
+    await message.answer(f"✅ Глобальные ключевые слова обновлены.")
     await state.clear()
-    await message.answer(
-        "Cancelled.",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+
+@router.callback_query(F.data == "set_vk_group_ids")
+async def set_vk_group_ids(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(parser_name="vk")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_vk")]
+    ])
+    await callback.message.edit_text("Введите ID групп VK через запятую:", reply_markup=keyboard)
+    await state.set_state(Form.setting_vk_group_ids)
+    await callback.answer()
+
+@router.message(Form.setting_vk_group_ids)
+async def process_vk_group_ids(message: Message, state: FSMContext):
+    group_ids = [gid.strip() for gid in message.text.split(',') if gid.strip()]
+    settings = db.get_vk_settings()
+    settings["group_ids"] = group_ids
+    db.save_vk_full_settings(settings)
+    await message.answer("✅ ID групп VK обновлены.")
+    await state.clear()
+
+@router.callback_query(F.data == "set_habr_cities")
+async def set_habr_cities(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(parser_name="habr")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_habr")]
+    ])
+    await callback.message.edit_text("Введите города для Habr Career через запятую:", reply_markup=keyboard)
+    await state.set_state(Form.setting_habr_cities)
+    await callback.answer()
+
+@router.message(Form.setting_habr_cities)
+async def process_habr_cities(message: Message, state: FSMContext):
+    cities = [city.strip() for city in message.text.split(',') if city.strip()]
+    settings = db.get_habr_settings()
+    settings["cities"] = cities
+    db.save_habr_settings(settings["keywords"], settings["min_salary"], settings["max_salary"], cities, settings["employment_types"])
+    await message.answer("✅ Города для Habr Career обновлены.")
+    await state.clear()
