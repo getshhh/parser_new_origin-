@@ -10,7 +10,8 @@ import re
 router = Router()
 db = Database()
 
-async def settings_vk_menu(callback: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "settings_vk")
+async def settings_vk(callback: CallbackQuery, state: FSMContext):
     settings = db.get_vk_settings()
     min_price = settings.get("min_price", None)
     max_price = settings.get("max_price", None)
@@ -24,7 +25,7 @@ async def settings_vk_menu(callback: CallbackQuery, state: FSMContext):
     price_range = ' '.join(price_range_parts) if price_range_parts else 'не задан'
 
     settings_text = (
-        "⚙️ **Настройки VK (специфичные)**\n\n"
+        "⚙️ **Настройки VK**\n\n"
         f"**Ценовой диапазон:** {price_range}\n"
         f"**ID групп:** {', '.join(group_ids) if group_ids else 'Не заданы'}\n\n"
         "Выберите, что хотите изменить."
@@ -35,6 +36,13 @@ async def settings_vk_menu(callback: CallbackQuery, state: FSMContext):
 # -----------------------------
 # изменение диапазона цен
 # -----------------------------
+from .parser_settings import parser_settings as generic_parser_settings
+
+@router.callback_query(F.data == "channel_settings_vk")
+async def channel_settings_vk(callback: CallbackQuery, state: FSMContext):
+    callback.data = "settings_vk"
+    await generic_parser_settings(callback, state)
+
 @router.callback_query(F.data == "set_vk_price")
 async def set_vk_price(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Введите минимальную цену:")
@@ -94,28 +102,3 @@ async def process_vk_groups(message: Message, state: FSMContext):
         await state.clear()
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
-
-
-# -----------------------------
-# Настройка интервала для VK
-# -----------------------------
-@router.callback_query(F.data == "set_vk_interval")
-async def set_vk_interval(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Введите интервал между сообщениями в секундах:")
-    await state.set_state(Form.vk_interval)
-    await callback.answer()
-
-@router.message(Form.vk_interval)
-async def process_vk_interval(message: Message, state: FSMContext):
-    try:
-        interval = int(message.text)
-        if interval <= 0:
-            await message.answer("❌ Интервал должен быть положительным числом. Попробуйте еще раз.")
-            return
-
-        db.set_parser_interval('vk', interval)
-        await message.answer(f"✅ Интервал для VK установлен: {interval} сек.")
-        await state.clear()
-
-    except ValueError:
-        await message.answer("❌ Введите число!")

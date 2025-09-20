@@ -9,7 +9,8 @@ from keyboards.settings_youdo import settings_youdo_kb
 router = Router()
 db = Database()
 
-async def settings_youdo_menu(callback: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "settings_youdo")
+async def settings_youdo(callback: CallbackQuery, state: FSMContext):
     settings = db.get_youdo_settings()
     min_price = settings.get("min_price", None)
     max_price = settings.get("max_price", None)
@@ -22,7 +23,7 @@ async def settings_youdo_menu(callback: CallbackQuery, state: FSMContext):
     price_range = ' '.join(price_range_parts) if price_range_parts else 'не задан'
 
     settings_text = (
-        "⚙️ **Настройки YouDo (специфичные)**\n\n"
+        "⚙️ **Настройки YouDo**\n\n"
         f"**Ценовой диапазон:** {price_range}\n\n"
         "Выберите, что хотите изменить."
     )
@@ -32,6 +33,13 @@ async def settings_youdo_menu(callback: CallbackQuery, state: FSMContext):
 # -----------------------------
 # изменение диапазона цен
 # -----------------------------
+from .parser_settings import parser_settings as generic_parser_settings
+
+@router.callback_query(F.data == "channel_settings_youdo")
+async def channel_settings_youdo(callback: CallbackQuery, state: FSMContext):
+    callback.data = "settings_youdo"
+    await generic_parser_settings(callback, state)
+
 @router.callback_query(F.data == "set_youdo_price")
 async def set_youdo_price(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Введите минимальную цену:")
@@ -57,30 +65,5 @@ async def process_youdo_price_max(message: Message, state: FSMContext):
         db.save_youdo_settings(settings.get('keywords'), data.get('min_price'), max_price)
         await message.answer(f"✅ Ценовой диапазон для YouDo обновлён: {data.get('min_price')} - {max_price} руб.")
         await state.clear()
-    except ValueError:
-        await message.answer("❌ Введите число!")
-
-
-# -----------------------------
-# Настройка интервала для YouDo
-# -----------------------------
-@router.callback_query(F.data == "set_youdo_interval")
-async def set_youdo_interval(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Введите интервал между сообщениями в секундах:")
-    await state.set_state(Form.setting_youdo_interval)
-    await callback.answer()
-
-@router.message(Form.setting_youdo_interval)
-async def process_youdo_interval(message: Message, state: FSMContext):
-    try:
-        interval = int(message.text)
-        if interval <= 0:
-            await message.answer("❌ Интервал должен быть положительным числом. Попробуйте еще раз.")
-            return
-
-        db.set_parser_interval('youdo', interval)
-        await message.answer(f"✅ Интервал для YouDo установлен: {interval} сек.")
-        await state.clear()
-
     except ValueError:
         await message.answer("❌ Введите число!")

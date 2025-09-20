@@ -92,7 +92,7 @@ class KworkParserService:
         self.is_running = True
         self.chat_id = chat_id
         log.info("Парсер Kwork запущен.")
-        self.task = asyncio.create_task(self._parsing_loop())
+        self.task = asyncio.create_task(self._parsing_loop(chat_id))
 
     async def stop_parser(self) -> None:
         if not self.is_running:
@@ -102,14 +102,16 @@ class KworkParserService:
             self.task.cancel()
         log.info("Парсер Kwork остановлен.")
 
-    async def _parsing_loop(self) -> None:
+    async def _parsing_loop(self, chat_id: int) -> None:
+        channels = self.db.get_parser_channels("kwork")
+        if not channels:
+            log.info("Нет настроенных каналов для Kwork. Парсер не будет запущен.")
+            await self.bot.send_message(chat_id, "Нет настроенных каналов для Kwork. Парсер не будет запущен.")
+            self.is_running = False
+            return
+
         while self.is_running:
             try:
-                channels = self.db.get_parser_channels("kwork")
-                if not channels:
-                    log.info("Нет настроенных каналов для Kwork. Парсер не будет запущен.")
-                    return
-
                 await self._parse_and_send(channels)
                 # ⚡️ тянем интервал из БД
                 settings = self.db.get_parser_settings("kwork")

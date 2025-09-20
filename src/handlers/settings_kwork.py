@@ -9,7 +9,8 @@ from keyboards.settings_kwork import settings_kwork_kb
 router = Router()
 db = Database()
 
-async def settings_kwork_menu(callback: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "settings_kwork")
+async def settings_kwork(callback: CallbackQuery, state: FSMContext):
     settings = db.get_settings('kwork')
     min_price = settings.get("min_price", None)
     max_price = settings.get("max_price", None)
@@ -22,7 +23,7 @@ async def settings_kwork_menu(callback: CallbackQuery, state: FSMContext):
     price_range = ' '.join(price_range_parts) if price_range_parts else 'не задан'
 
     settings_text = (
-        "⚙️ **Настройки Kwork (специфичные)**\n\n"
+        "⚙️ **Настройки Kwork**\n\n"
         f"**Ценовой диапазон:** {price_range}\n\n"
         "Выберите, что хотите изменить."
     )
@@ -32,6 +33,14 @@ async def settings_kwork_menu(callback: CallbackQuery, state: FSMContext):
 # -----------------------------
 # изменение диапазона цен
 # -----------------------------
+from .parser_settings import parser_settings as generic_parser_settings
+
+@router.callback_query(F.data == "channel_settings_kwork")
+async def channel_settings_kwork(callback: CallbackQuery, state: FSMContext):
+    # a little hack to reuse the generic handler
+    callback.data = "settings_kwork"
+    await generic_parser_settings(callback, state)
+
 @router.callback_query(F.data == "set_kwork_price")
 async def set_kwork_price(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Введите минимальную цену:")
@@ -57,30 +66,5 @@ async def process_kwork_price_max(message: Message, state: FSMContext):
         db.save_settings(settings.get('keywords'), data.get('min_price'), max_price, 'kwork')
         await message.answer(f"✅ Ценовой диапазон обновлён: {data.get('min_price')} - {max_price} руб.")
         await state.clear()
-    except ValueError:
-        await message.answer("❌ Введите число!")
-
-
-# -----------------------------
-# Настройка интервала для Kwork
-# -----------------------------
-@router.callback_query(F.data == "set_kwork_interval")
-async def set_kwork_interval(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Введите интервал между сообщениями в секундах:")
-    await state.set_state(Form.setting_kwork_interval)
-    await callback.answer()
-
-@router.message(Form.setting_kwork_interval)
-async def process_kwork_interval(message: Message, state: FSMContext):
-    try:
-        interval = int(message.text)
-        if interval <= 0:
-            await message.answer("❌ Интервал должен быть положительным числом. Попробуйте еще раз.")
-            return
-
-        db.set_parser_interval('kwork', interval)
-        await message.answer(f"✅ Интервал для Kwork установлен: {interval} сек.")
-        await state.clear()
-
     except ValueError:
         await message.answer("❌ Введите число!")

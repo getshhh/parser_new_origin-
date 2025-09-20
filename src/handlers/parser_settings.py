@@ -1,5 +1,7 @@
+import logging
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message
+from aiogram.filters import Command
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 from keyboards.parser_settings import (
     get_parser_settings_kb,
@@ -66,36 +68,59 @@ async def select_channel_to_add(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split("_")
     parser_name = parts[3]
     channel_id = int(parts[4])
-    await state.update_data(parser_name=parser_name, channel_id=channel_id)
 
-    await callback.message.edit_text("Введите ключевые слова через запятую (или оставьте пустым, чтобы принимать все):")
+    message = await callback.message.edit_text("Введите ключевые слова через запятую (или напишите 'нет', чтобы не использовать ключевые слова):")
+    await state.update_data(parser_name=parser_name, channel_id=channel_id, prompt_message_id=message.message_id)
     await state.set_state(Form.setting_keywords)
 
 
 @router.message(Form.setting_keywords)
 async def process_keywords(message: Message, state: FSMContext):
-    keywords = [kw.strip() for kw in message.text.split(',') if kw.strip()]
-    await state.update_data(keywords=keywords)
+    data = await state.get_data()
+    prompt_message_id = data.get("prompt_message_id")
+
+    if message.text.lower() == 'нет':
+        keywords = []
+    else:
+        keywords = [kw.strip() for kw in message.text.split(',') if kw.strip()]
     
-    await message.answer("Теперь введите минус-слова через запятую (или оставьте пустым):")
+    new_prompt = await message.answer("Теперь введите минус-слова через запятую (или напишите 'нет', чтобы не использовать минус-слова):")
+
+    await state.update_data(keywords=keywords, prompt_message_id=new_prompt.message_id)
     await state.set_state(Form.setting_minus_keywords)
+
+    try:
+        await message.bot.delete_message(message.chat.id, prompt_message_id)
+        await message.delete()
+    except Exception as e:
+        logging.error(f"Failed to delete messages: {e}")
 
 
 @router.message(Form.setting_minus_keywords)
 async def process_minus_keywords(message: Message, state: FSMContext):
     data = await state.get_data()
+    prompt_message_id = data.get("prompt_message_id")
     parser_name = data["parser_name"]
     channel_id = data["channel_id"]
     keywords = data["keywords"]
-    minus_keywords = [kw.strip() for kw in message.text.split(',') if kw.strip()]
-    
+    if message.text.lower() == 'нет':
+        minus_keywords = []
+    else:
+        minus_keywords = [kw.strip() for kw in message.text.split(',') if kw.strip()]
+
     db.add_parser_channel(parser_name, channel_id, keywords, minus_keywords)
-    
+
     await message.answer(
         "✅ Канал успешно добавлен!",
         reply_markup=get_back_to_parser_settings_kb(parser_name)
     )
     await state.clear()
+
+    try:
+        await message.bot.delete_message(message.chat.id, prompt_message_id)
+        await message.delete()
+    except Exception as e:
+        logging.error(f"Failed to delete messages: {e}")
 
 
 @router.callback_query(F.data.startswith("remove_channel_"))
@@ -169,28 +194,45 @@ async def select_channel_to_edit(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split("_")
     parser_name = parts[3]
     channel_id = int(parts[4])
-    await state.update_data(parser_name=parser_name, channel_id=channel_id)
 
-    await callback.message.edit_text("Введите новые ключевые слова через запятую (или оставьте пустым):")
+    message = await callback.message.edit_text("Введите новые ключевые слова через запятую (или напишите 'нет', чтобы не использовать ключевые слова):")
+    await state.update_data(parser_name=parser_name, channel_id=channel_id, prompt_message_id=message.message_id)
     await state.set_state(Form.editing_keywords)
 
 
 @router.message(Form.editing_keywords)
 async def process_editing_keywords(message: Message, state: FSMContext):
-    keywords = [kw.strip() for kw in message.text.split(',') if kw.strip()]
-    await state.update_data(keywords=keywords)
+    data = await state.get_data()
+    prompt_message_id = data.get("prompt_message_id")
 
-    await message.answer("Теперь введите новые минус-слова через запятую (или оставьте пустым):")
+    if message.text.lower() == 'нет':
+        keywords = []
+    else:
+        keywords = [kw.strip() for kw in message.text.split(',') if kw.strip()]
+
+    new_prompt = await message.answer("Теперь введите новые минус-слова через запятую (или напишите 'нет', чтобы не использовать минус-слова):")
+
+    await state.update_data(keywords=keywords, prompt_message_id=new_prompt.message_id)
     await state.set_state(Form.editing_minus_keywords)
+
+    try:
+        await message.bot.delete_message(message.chat.id, prompt_message_id)
+        await message.delete()
+    except Exception as e:
+        logging.error(f"Failed to delete messages: {e}")
 
 
 @router.message(Form.editing_minus_keywords)
 async def process_editing_minus_keywords(message: Message, state: FSMContext):
     data = await state.get_data()
+    prompt_message_id = data.get("prompt_message_id")
     parser_name = data["parser_name"]
     channel_id = data["channel_id"]
     keywords = data["keywords"]
-    minus_keywords = [kw.strip() for kw in message.text.split(',') if kw.strip()]
+    if message.text.lower() == 'нет':
+        minus_keywords = []
+    else:
+        minus_keywords = [kw.strip() for kw in message.text.split(',') if kw.strip()]
 
     db.add_parser_channel(parser_name, channel_id, keywords, minus_keywords)
 
@@ -199,6 +241,12 @@ async def process_editing_minus_keywords(message: Message, state: FSMContext):
         reply_markup=get_back_to_parser_settings_kb(parser_name)
     )
     await state.clear()
+
+    try:
+        await message.bot.delete_message(message.chat.id, prompt_message_id)
+        await message.delete()
+    except Exception as e:
+        logging.error(f"Failed to delete messages: {e}")
 
 @router.callback_query(F.data.startswith("set_") & F.data.endswith("_interval"))
 async def set_parser_interval(callback: CallbackQuery, state: FSMContext):
@@ -210,16 +258,6 @@ async def set_parser_interval(callback: CallbackQuery, state: FSMContext):
         reply_markup=get_interval_selection_kb(parser_name)
     )
     await callback.answer()
-
-from .settings_kwork import settings_kwork_menu
-from .settings_fl import settings_fl_menu
-from .settings_guru import settings_guru_menu
-from .settings_weblancer import settings_weblancer_menu
-from .settings_workzilla import settings_workzilla_menu
-from .settings_youdo import settings_youdo_menu
-from .settings_vk import settings_vk_menu
-from .settings_habr import settings_habr_menu
-
 
 @router.callback_query(F.data.startswith("set_") & F.data.endswith("_interval_"))
 async def select_parser_interval(callback: CallbackQuery, state: FSMContext):
@@ -236,22 +274,19 @@ async def select_parser_interval(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-@router.callback_query(F.data.startswith("parser_specific_settings_"))
-async def parser_specific_settings(callback: CallbackQuery, state: FSMContext):
-    parser_name = callback.data.split("_")[3]
-    if parser_name == "kwork":
-        await settings_kwork_menu(callback, state)
-    elif parser_name == "fl":
-        await settings_fl_menu(callback, state)
-    elif parser_name == "guru":
-        await settings_guru_menu(callback, state)
-    elif parser_name == "weblancer":
-        await settings_weblancer_menu(callback, state)
-    elif parser_name == "workzilla":
-        await settings_workzilla_menu(callback, state)
-    elif parser_name == "youdo":
-        await settings_youdo_menu(callback, state)
-    elif parser_name == "vk":
-        await settings_vk_menu(callback, state)
-    elif parser_name == "habr":
-        await settings_habr_menu(callback, state)
+@router.message(Command(commands=["cancel"]))
+@router.message(F.text.casefold() == "cancel")
+async def cancel_handler(message: Message, state: FSMContext) -> None:
+    """
+    Allow user to cancel any action
+    """
+    current_state = await state.get_state()
+    if current_state is None:
+        return
+
+    logging.info("Cancelling state %r", current_state)
+    await state.clear()
+    await message.answer(
+        "Cancelled.",
+        reply_markup=ReplyKeyboardRemove(),
+    )

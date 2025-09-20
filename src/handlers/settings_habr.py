@@ -9,7 +9,8 @@ from keyboards.settings_habr import settings_habr_kb
 router = Router()
 db = Database()
 
-async def settings_habr_menu(callback: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "settings_habr")
+async def settings_habr(callback: CallbackQuery, state: FSMContext):
     settings = db.get_habr_settings()
     min_salary = settings.get("min_salary", None)
     max_salary = settings.get("max_salary", None)
@@ -23,7 +24,7 @@ async def settings_habr_menu(callback: CallbackQuery, state: FSMContext):
     salary_range = ' '.join(salary_range_parts) if salary_range_parts else 'не задан'
 
     settings_text = (
-        "⚙️ **Настройки Habr (специфичные)**\n\n"
+        "⚙️ **Настройки Habr**\n\n"
         f"**Зарплатный диапазон:** {salary_range}\n"
         f"**Города:** {', '.join(cities) if cities else 'Все города'}\n\n"
         "Выберите, что хотите изменить."
@@ -34,6 +35,13 @@ async def settings_habr_menu(callback: CallbackQuery, state: FSMContext):
 # -----------------------------
 # изменение зарплаты
 # -----------------------------
+from .parser_settings import parser_settings as generic_parser_settings
+
+@router.callback_query(F.data == "channel_settings_habr")
+async def channel_settings_habr(callback: CallbackQuery, state: FSMContext):
+    callback.data = "settings_habr"
+    await generic_parser_settings(callback, state)
+
 @router.callback_query(F.data == "set_habr_salary")
 async def set_habr_salary(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Введите минимальную зарплату:")
@@ -90,28 +98,3 @@ async def process_habr_cities(message: Message, state: FSMContext):
     )
     await message.answer(f"✅ Города обновлены: {', '.join(cities) if cities else 'Все города'}")
     await state.clear()
-
-
-# -----------------------------
-# Настройка интервала для Habr
-# -----------------------------
-@router.callback_query(F.data == "set_habr_interval")
-async def set_habr_interval(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Введите интервал между сообщениями в секундах:")
-    await state.set_state(Form.setting_habr_interval)
-    await callback.answer()
-
-@router.message(Form.setting_habr_interval)
-async def process_habr_interval(message: Message, state: FSMContext):
-    try:
-        interval = int(message.text)
-        if interval <= 0:
-            await message.answer("❌ Интервал должен быть положительным числом. Попробуйте еще раз.")
-            return
-
-        db.set_parser_interval('habr', interval)
-        await message.answer(f"✅ Интервал для Habr установлен: {interval} сек.")
-        await state.clear()
-
-    except ValueError:
-        await message.answer("❌ Введите число!")

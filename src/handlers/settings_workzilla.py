@@ -9,7 +9,8 @@ from keyboards.settings_workzilla import settings_workzilla_kb
 router = Router()
 db = Database()
 
-async def settings_workzilla_menu(callback: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "settings_workzilla")
+async def settings_workzilla(callback: CallbackQuery, state: FSMContext):
     settings = db.get_workzilla_settings()
     min_price = settings.get("min_price", None)
     max_price = settings.get("max_price", None)
@@ -22,12 +23,19 @@ async def settings_workzilla_menu(callback: CallbackQuery, state: FSMContext):
     price_range = ' '.join(price_range_parts) if price_range_parts else 'не задан'
 
     settings_text = (
-        "⚙️ **Настройки Work-Zilla (специфичные)**\n\n"
+        "⚙️ **Настройки Work-Zilla**\n\n"
         f"**Ценовой диапазон:** {price_range}\n\n"
         "Выберите, что хотите изменить."
     )
     await callback.message.edit_text(settings_text, reply_markup=settings_workzilla_kb(), parse_mode="Markdown")
     await callback.answer()
+
+from .parser_settings import parser_settings as generic_parser_settings
+
+@router.callback_query(F.data == "channel_settings_workzilla")
+async def channel_settings_workzilla(callback: CallbackQuery, state: FSMContext):
+    callback.data = "settings_workzilla"
+    await generic_parser_settings(callback, state)
 
 @router.callback_query(F.data == "set_workzilla_price")
 async def set_workzilla_price(callback: CallbackQuery, state: FSMContext):

@@ -30,13 +30,16 @@ class HabrParserService:
         
         self.session = aiohttp.ClientSession()
         
+        channels = self.db.get_parser_channels("habr")
+        if not channels:
+            log.info("Нет настроенных каналов для Habr. Парсер не будет запущен.")
+            if self.bot and chat_id:
+                await self.bot.send_message(chat_id, "Нет настроенных каналов для Habr. Парсер не будет запущен.")
+            self.is_running = False
+            return
+
         while self.is_running:
             try:
-                channels = self.db.get_parser_channels("habr")
-                if not channels:
-                    log.info("Нет настроенных каналов для Habr. Парсер не будет запущен.")
-                    break
-
                 all_vacancies = await self.extract_habr_vacancies()
 
                 unique_new_vacancies = []

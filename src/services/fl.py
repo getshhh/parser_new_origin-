@@ -90,13 +90,16 @@ class FLParserService:
         log.info("FL parser stopped")
 
     async def _run_loop(self, chat_id: Optional[int]) -> None:
+        channels = self.db.get_parser_channels("fl")
+        if not channels:
+            log.info("Нет настроенных каналов для FL. Парсер не будет запущен.")
+            if self.bot and chat_id:
+                await self.bot.send_message(chat_id, "Нет настроенных каналов для FL. Парсер не будет запущен.")
+            self.is_running = False
+            return
+
         while self.is_running:
             try:
-                channels = self.db.get_parser_channels("fl")
-                if not channels:
-                    log.info("Нет настроенных каналов для FL. Парсер не будет запущен.")
-                    return
-
                 await self._parse_and_store(channels)
                 # ⚡️ тянем интервал из БД
                 settings = self.db.get_parser_settings("fl")
